@@ -601,7 +601,7 @@ async function extractSingleVideoFrames(scanId, directory, video) {
   for (const [index, filename] of filenames.entries()) {
     const source = path.join(candidateDirectory, filename);
     const metadata = await sharp(source).metadata();
-    if (!metadata.width || !metadata.height || Math.min(metadata.width, metadata.height) < 600) continue;
+    if (!metadata.width || !metadata.height || Math.max(metadata.width, metadata.height) < 600) continue;
     const { data, info } = await sharp(source)
       .resize({ width: 640, height: 640, fit: "inside", withoutEnlargement: true })
       .greyscale()
