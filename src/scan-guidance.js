@@ -141,77 +141,55 @@ export function recordHeadingCoverage(coverage, heading, startingHeading) {
   return updated;
 }
 
+export function getRouteCoverage(coverage, sectorIndex, requiredBins = 9) {
+  const sectorStart = sectorIndex * 12;
+  const covered = coverage.slice(sectorStart, sectorStart + 12).filter(Boolean).length;
+  return {
+    covered,
+    progress: Math.min(100, Math.round((covered / requiredBins) * 100)),
+    complete: covered >= requiredBins,
+  };
+}
+
 export function getAdaptiveScanGuidance({
   bounds,
-  previousBounds,
-  heading,
-  startingHeading,
   sectorIndex,
   coverage,
 }) {
   if (!bounds) {
     return {
       message: "Tap the item again in the camera view.",
-      aimPoint: null,
       progress: 0,
-      targetDirection: null,
       complete: false,
     };
   }
 
-  const centerX = (bounds.left + bounds.right) / 2;
-  const centerY = (bounds.top + bounds.bottom) / 2;
-  const sectorStart = sectorIndex * 12;
-  const sectorCoverage = coverage
-    .slice(sectorStart, sectorStart + 12)
-    .filter(Boolean).length;
-  const progress = Math.round((sectorCoverage / 12) * 100);
-  const complete = sectorCoverage >= 9;
-  const directions = [];
+  const { progress, complete } = getRouteCoverage(coverage, sectorIndex);
 
   if (bounds.left < 0.03 || bounds.right > 0.97 || bounds.top < 0.03 || bounds.bottom > 0.97) {
-    directions.push("Move back slightly");
-  } else if (Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) < 0.25) {
-    directions.push("Move closer");
+    return {
+      message: "Move back slightly so the whole item stays in frame.",
+      progress,
+      complete,
+    };
+  }
+  if (Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) < 0.25) {
+    return {
+      message: "Move closer while keeping the whole item in frame.",
+      progress,
+      complete,
+    };
   }
 
-  if (centerX < 0.35) directions.push("Move left in the frame");
-  else if (centerX > 0.65) directions.push("Move right in the frame");
-  if (centerY < 0.35) directions.push("Move toward the top of the frame");
-  else if (centerY > 0.65) directions.push("Move toward the bottom of the frame");
-
-  let targetDirection = null;
-  if (!complete && coverage.length === 24 && Number.isFinite(heading) && Number.isFinite(startingHeading)) {
-    const targetBins = coverage
-      .map((covered, index) => ({ covered, index }))
-      .filter(({ covered, index }) => !covered && index >= sectorStart && index < sectorStart + 12)
-      .map(({ index }) => {
-        const targetHeading = normalizeDegrees(startingHeading + index * 15 + 7.5);
-        const difference = ((targetHeading - heading + 540) % 360) - 180;
-        return { difference, distance: Math.abs(difference) };
-      })
-      .sort((left, right) => left.distance - right.distance);
-    if (targetBins.length > 0) {
-      const { difference } = targetBins[0];
-      targetDirection = difference > 3 ? "right" : difference < -3 ? "left" : "straight";
-    }
-  }
-
-  if (complete) {
-    directions.push(sectorIndex === 0 ? "Start the second route" : "Capture route complete");
-  } else if (targetDirection) {
-    directions.push(targetDirection === "straight" ? "Continue to the next marker" : `Turn ${targetDirection}`);
-  }
-
-  if (previousBounds && Math.abs(centerX - ((previousBounds.left + previousBounds.right) / 2)) > 0.08) {
-    directions.push("Align the item with the center marker again");
-  }
+  const message = complete
+    ? "This half is complete. Continue to the next step."
+    : sectorIndex === 0
+      ? "Keep the item centered. Slowly move around it for the first half of the circle."
+      : "Keep the item centered. Continue in the same direction around the remaining half.";
 
   return {
-    message: directions.length > 0 ? directions.join(" · ") : "Keep the item aligned with the center marker and follow the direction shown.",
-    aimPoint: { x: centerX, y: centerY },
+    message,
     progress,
-    targetDirection,
     complete,
   };
 }

@@ -3,6 +3,7 @@ import {
   getAdaptiveScanGuidance,
   getDetailCaptureGuidance,
   hasDetailCaptureFraming,
+  getRouteCoverage,
   recordHeadingCoverage,
   supportsDetailCaptureResolution,
 } from "./scan-guidance.js";
@@ -11,13 +12,13 @@ const MIN_IMAGES = 24;
 const MAX_IMAGES = 80;
 const MAX_SCAN_BYTES = 512 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-const MAX_VIDEO_SECONDS = 45;
-const CAMERA_PASS_SECONDS = 45;
+const MAX_VIDEO_SECONDS = 30;
+const CAMERA_PASS_SECONDS = 30;
 const MIN_SECTOR_COVERAGE = 9;
-const MIN_RECORDING_SECONDS = 8;
+const MIN_RECORDING_SECONDS = 5;
 const MIN_DETAIL_FRAMES = 20;
 const MIN_DETAIL_VIDEO_SECONDS = 20;
-const DETAIL_RECORDING_SECONDS = 30;
+const DETAIL_RECORDING_SECONDS = 20;
 const MIN_DETAIL_RESOLUTION = 3840;
 const DARKNESS_THRESHOLD = 48;
 const BRIGHTNESS_RECOVERY_THRESHOLD = 72;
@@ -26,12 +27,12 @@ const FRAME_SAMPLE_SECONDS = 0.3;
 const MAX_VIDEO_CANDIDATES = 120;
 const MAX_FRAME_DIMENSION = 2560;
 const scanSectors = [
-  { id: "route-a", label: "Full rotation 1/2", target: "Top marker" },
-  { id: "route-b", label: "Full rotation 2/2", target: "Bottom marker" },
+  { id: "route-a", label: "Level orbit · first half" },
+  { id: "route-b", label: "Level orbit · second half" },
 ];
 const captureStages = [
   ...scanSectors,
-  { id: "detail", label: "4K close-up capture", target: "Move closer to the item" },
+  { id: "detail", label: "4K close-up capture" },
 ];
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 const displayCategory = (category) => category;
@@ -197,7 +198,6 @@ function App() {
   const [segmenterReady, setSegmenterReady] = useState(false);
   const [objectSelection, setObjectSelection] = useState(null);
   const [objectBounds, setObjectBounds] = useState(null);
-  const [targetDirection, setTargetDirection] = useState(null);
   const [cameraGuide, setCameraGuide] = useState("Open the live camera, then tap the item you want to sell.");
   const [segmenterLoadProgress, setSegmenterLoadProgress] = useState(null);
   const [segmenterLoadStage, setSegmenterLoadStage] = useState(null);
@@ -212,12 +212,13 @@ function App() {
   const workerRef = useRef(null);
   const segmenterInitializationStarted = useRef(false);
   const selectionRef = useRef(null);
-  const previousBoundsRef = useRef(null);
   const orientationRef = useRef(null);
   const startingHeadingRef = useRef(null);
   const sectorCoverageRef = useRef(Array(24).fill(false));
   const activeSectorIndexRef = useRef(0);
+  const routeVideoPartsRef = useRef({ "route-a": [], "route-b": [] });
   const recordingStartedAtRef = useRef(0);
+  const recordingCoverageStartRef = useRef(null);
   const cancelledRecordingRef = useRef(false);
   const torchEnabledRef = useRef(false);
   const torchSupportedRef = useRef(false);
@@ -238,6 +239,7 @@ function App() {
 
   const files = frames.map((frame) => frame.file);
   const activeCaptureStage = captureStages[activeSectorIndex] || null;
+  const completedCaptureStageCount = new Set(videoClips.map((clip) => clip.sector)).size;
   const cameraSettings = streamRef.current?.getVideoTracks()[0]?.getSettings?.();
   const detailCaptureReady = activeCaptureStage?.id !== "detail" || (
     supportsDetailCaptureResolution(cameraSettings?.width, cameraSettings?.height) &&
@@ -252,6 +254,8 @@ function App() {
     setActiveSectorIndex(0);
     activeSectorIndexRef.current = 0;
     sectorCoverageRef.current = Array(24).fill(false);
+    startingHeadingRef.current = null;
+    routeVideoPartsRef.current = { "route-a": [], "route-b": [] };
     setSectorProgress(0);
     setBrightness(null);
     setFrameReport("");
@@ -379,12 +383,10 @@ function App() {
               orientation.alpha,
               startingHeadingRef.current,
             );
-            const covered = sectorCoverageRef.current
-              .slice(sectorIndex * 12, sectorIndex * 12 + 12)
-              .filter(Boolean).length;
-            setSectorProgress(Math.round((covered / 12) * 100));
+            const routeCoverage = getRouteCoverage(sectorCoverageRef.current, sectorIndex);
+            setSectorProgress(routeCoverage.progress);
             const elapsedSeconds = (Date.now() - recordingStartedAtRef.current) / 1000;
-            if (covered >= MIN_SECTOR_COVERAGE && elapsedSeconds >= MIN_RECORDING_SECONDS) {
+            if (routeCoverage.complete && elapsedSeconds >= MIN_RECORDING_SECONDS) {
               recorder.stop();
             }
           }
@@ -395,7 +397,6 @@ function App() {
           selectionRef.current = point;
           setObjectSelection(point);
           if (detailPass) {
-            setTargetDirection("straight");
             const detailGuidance = getDetailCaptureGuidance(bounds);
             if (brightnessLevel < DARKNESS_THRESHOLD && !torchEnabledRef.current) {
               setCameraGuide("Close-up capture needs more light. Turn on a light and try again.");
@@ -407,15 +408,12 @@ function App() {
           } else {
             const guidance = getAdaptiveScanGuidance({
               bounds,
-              previousBounds: previousBoundsRef.current,
-              heading: orientation?.alpha,
-              startingHeading: startingHeadingRef.current,
               sectorIndex: activeSectorIndexRef.current,
               coverage: sectorCoverageRef.current,
             });
-            setTargetDirection(guidance.targetDirection);
+            setSectorProgress(guidance.progress);
             if (!cameraReady) {
-              setCameraGuide("Align the item with the center marker, then start recording the route.");
+              setCameraGuide("Camera disconnected. Reopen it to continue this route.");
             } else if (
               brightnessLevel < DARKNESS_THRESHOLD &&
               !torchEnabledRef.current &&
@@ -425,14 +423,12 @@ function App() {
             } else if (brightnessLevel < DARKNESS_THRESHOLD && !torchEnabledRef.current) {
               setCameraGuide("There is not enough light. Turn on nearby lights to continue.");
             } else if (!recorder || recorder.state !== "recording") {
-              setCameraGuide(guidance.complete ? "This route is recorded. Continue to the next route." : "Align the item with the center marker, then start rotating the camera.");
+              setCameraGuide(guidance.complete ? "This half is complete. Continue to the next step." : guidance.message);
             } else {
               setCameraGuide(guidance.message);
             }
           }
-          previousBoundsRef.current = bounds;
         } else {
-          setTargetDirection("straight");
           setCameraGuide("The item is out of frame. Bring it back into view.");
         }
       } else if (event.data.type === "error") {
@@ -456,13 +452,11 @@ function App() {
       segmenterInitializationStarted.current = false;
       segmentationBusy.current = false;
       selectionRef.current = null;
-      previousBoundsRef.current = null;
       setSegmenterReady(false);
       setSegmenterLoadProgress(null);
       setSegmenterLoadStage(null);
       setObjectBounds(null);
       setObjectSelection(null);
-      setTargetDirection(null);
     };
   }, [cameraReady, showCamera]);
 
@@ -755,6 +749,7 @@ function App() {
   };
 
   const processVideoClip = async (clip, sectorId) => {
+    const clips = Array.isArray(clip) ? clip : [clip];
     const detailPass = sectorId === "detail";
     if (!detailPass && framesRef.current.length >= MAX_IMAGES) {
       setFormError(`You can use up to ${MAX_IMAGES} selected frames.`);
@@ -765,46 +760,52 @@ function App() {
     setFormError("");
     setFrameReport(detailPass
       ? "Checking the 4K close-up video for sharp frames that show the item's surface."
-      : "Selecting sharp, distinct views from the recorded route.");
-
-    const videoUrl = URL.createObjectURL(clip);
-    const video = document.createElement("video");
-    video.muted = true;
-    video.playsInline = true;
-    video.preload = "auto";
-    video.src = videoUrl;
+      : "Checking the saved route clips and selecting sharp, distinct views.");
+    const sources = [];
 
     try {
-      await new Promise((resolve, reject) => {
-        video.addEventListener("loadedmetadata", resolve, { once: true });
-        video.addEventListener("error", () => reject(new Error("Could not read the recorded video. Record the camera route again.")), { once: true });
-        video.load();
-      });
-      const minimumDuration = detailPass ? MIN_DETAIL_VIDEO_SECONDS : MIN_RECORDING_SECONDS;
-      const maximumDuration = detailPass ? DETAIL_RECORDING_SECONDS : MAX_VIDEO_SECONDS;
-      if (!Number.isFinite(video.duration) || video.duration < minimumDuration) {
-        throw new Error(detailPass
-          ? `The close-up must be at least ${MIN_DETAIL_VIDEO_SECONDS} seconds to capture enough sharp frames.`
-          : "The route recording is too short. Record the same route again.");
-      }
-      if (video.duration > maximumDuration + 1) {
-        throw new Error(`The recorded video must be ${maximumDuration} seconds or shorter.`);
-      }
-      if (!video.videoWidth || !video.videoHeight) {
-        throw new Error("The video has no readable frames.");
-      }
-      if (detailPass && !supportsDetailCaptureResolution(video.videoWidth, video.videoHeight)) {
-        throw new Error(`The close-up was recorded below ${MIN_DETAIL_RESOLUTION}px. Check whether your device supports 4K recording and try again.`);
-      }
-
-      const interval = Math.max(detailPass ? 0.5 : FRAME_SAMPLE_SECONDS, video.duration / MAX_VIDEO_CANDIDATES);
       const candidates = [];
-      for (let time = Math.min(0.15, video.duration / 4); time < video.duration - 0.08; time += interval) {
-        await seekVideo(video, time);
-        candidates.push({ time, ...analyzeFrame(video, detailPass ? 960 : 320) });
+      let totalDuration = 0;
+      for (const routeClip of clips) {
+        const videoUrl = URL.createObjectURL(routeClip);
+        const video = document.createElement("video");
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = "auto";
+        video.src = videoUrl;
+        sources.push({ video, videoUrl });
+        await new Promise((resolve, reject) => {
+          video.addEventListener("loadedmetadata", resolve, { once: true });
+          video.addEventListener("error", () => reject(new Error("Could not read a saved recording. Reconnect the camera and try again.")), { once: true });
+          video.load();
+        });
+        const minimumDuration = detailPass ? MIN_DETAIL_VIDEO_SECONDS : MIN_RECORDING_SECONDS;
+        const maximumDuration = detailPass ? DETAIL_RECORDING_SECONDS : MAX_VIDEO_SECONDS;
+        if (!Number.isFinite(video.duration) || video.duration < minimumDuration) {
+          throw new Error(detailPass
+            ? `The close-up must be at least ${MIN_DETAIL_VIDEO_SECONDS} seconds to capture enough sharp frames.`
+            : "A saved route segment is too short. Record it again before continuing.");
+        }
+        if (video.duration > maximumDuration + 1) {
+          throw new Error(`A recording must be ${maximumDuration} seconds or shorter.`);
+        }
+        if (!video.videoWidth || !video.videoHeight) throw new Error("A saved recording has no readable frames.");
+        if (detailPass && !supportsDetailCaptureResolution(video.videoWidth, video.videoHeight)) {
+          throw new Error(`The close-up was recorded below ${MIN_DETAIL_RESOLUTION}px. Check whether your device supports 4K recording and try again.`);
+        }
+        totalDuration += video.duration;
+        const candidateLimit = Math.max(12, Math.floor(MAX_VIDEO_CANDIDATES / clips.length));
+        const interval = Math.max(detailPass ? 0.5 : FRAME_SAMPLE_SECONDS, video.duration / candidateLimit);
+        for (let time = Math.min(0.15, video.duration / 4); time < video.duration - 0.08; time += interval) {
+          await seekVideo(video, time);
+          candidates.push({ video, time, ...analyzeFrame(video, detailPass ? 960 : 320) });
+        }
+      }
+      if (detailPass && (clips.length !== 1 || totalDuration < MIN_DETAIL_VIDEO_SECONDS)) {
+        throw new Error(`The close-up must be at least ${MIN_DETAIL_VIDEO_SECONDS} seconds to capture enough sharp frames.`);
       }
       if (candidates.length === 0) {
-        throw new Error("Could not extract frames from the video. Record a slightly longer clip.");
+        throw new Error("Could not extract frames from the saved recordings.");
       }
 
       const sharpnessValues = candidates.map((candidate) => candidate.sharpness).sort((left, right) => left - right);
@@ -834,12 +835,13 @@ function App() {
         if (selected.length < MIN_DETAIL_FRAMES) {
           throw new Error(`Fewer than ${MIN_DETAIL_FRAMES} distinct, sharp close-up frames were found. Improve the lighting, rotate the item more slowly, and record again.`);
         }
-        const currentBytes = videoClipsRef.current.reduce((total, savedClip) => total + savedClip.file.size, clip.size);
+        const currentBytes = videoClipsRef.current.reduce((total, savedClip) => total + savedClip.file.size, 0) +
+          clips.reduce((total, savedClip) => total + savedClip.size, 0);
         if (currentBytes > MAX_VIDEO_BYTES) {
           throw new Error("The combined capture videos exceed 512 MB.");
         }
-        const extension = clip.type.includes("mp4") ? "mp4" : "webm";
-        const videoFile = new File([clip], `${sectorId}.${extension}`, { type: clip.type || "video/webm" });
+        const extension = clips[0].type.includes("mp4") ? "mp4" : "webm";
+        const videoFile = new File([clips[0]], `${sectorId}.${extension}`, { type: clips[0].type || "video/webm" });
         videoClipsRef.current = [
           ...videoClipsRef.current.filter((video) => video.sector !== sectorId),
           { sector: sectorId, file: videoFile },
@@ -854,6 +856,7 @@ function App() {
 
       const extracted = [];
       for (const candidate of selected) {
+        const { video } = candidate;
         await seekVideo(video, candidate.time);
         const scale = Math.min(1, MAX_FRAME_DIMENSION / Math.max(video.videoWidth, video.videoHeight));
         const width = Math.round(video.videoWidth * scale);
@@ -895,7 +898,8 @@ function App() {
       if (currentBytes + nextBytes > MAX_SCAN_BYTES) {
         throw new Error("The selected frames exceed 512 MB in total.");
       }
-      if (videoClipsRef.current.reduce((total, savedClip) => total + savedClip.file.size, clip.size) > MAX_VIDEO_BYTES) {
+      if (videoClipsRef.current.reduce((total, savedClip) => total + savedClip.file.size, 0) +
+        clips.reduce((total, routeClip) => total + routeClip.size, 0) > MAX_VIDEO_BYTES) {
         throw new Error("The combined videos for both routes exceed 512 MB.");
       }
       if (extracted.length < MIN_IMAGES / scanSectors.length) {
@@ -903,16 +907,25 @@ function App() {
       }
       framesRef.current = [...framesRef.current, ...extracted];
       setFrames(framesRef.current);
-      const extension = clip.type.includes("mp4") ? "mp4" : "webm";
-      const videoFile = new File([clip], `${sectorId}.${extension}`, { type: clip.type || "video/webm" });
+      const videoFiles = clips.map((routeClip, index) => {
+        const extension = routeClip.type.includes("mp4") ? "mp4" : "webm";
+        return {
+          sector: sectorId,
+          file: new File([routeClip], `${sectorId}-part-${index + 1}.${extension}`, { type: routeClip.type || "video/webm" }),
+        };
+      });
       videoClipsRef.current = [
         ...videoClipsRef.current.filter((video) => video.sector !== sectorId),
-        { sector: sectorId, file: videoFile },
+        ...videoFiles,
       ];
       setVideoClips(videoClipsRef.current);
+      routeVideoPartsRef.current[sectorId] = [];
       const nextSectorIndex = sectorId === "route-a" ? 1 : 2;
       setActiveSectorIndex(nextSectorIndex);
       activeSectorIndexRef.current = nextSectorIndex;
+      setSectorProgress(nextSectorIndex < scanSectors.length
+        ? getRouteCoverage(sectorCoverageRef.current, nextSectorIndex).progress
+        : 0);
       setFrameReport(
         `${extracted.length} frames selected · ${blurryCount} blurry and ${duplicateCount} duplicate views excluded`,
       );
@@ -922,11 +935,14 @@ function App() {
     } catch (error) {
       setFormError(error instanceof Error ? error.message : "Could not analyze the video frames.");
       setFrameReport("");
+      if (!detailPass) routeVideoPartsRef.current[sectorId] = clips;
     } finally {
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-      URL.revokeObjectURL(videoUrl);
+      for (const { video, videoUrl } of sources) {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+        URL.revokeObjectURL(videoUrl);
+      }
       setProcessingVideo(false);
     }
   };
@@ -966,6 +982,17 @@ function App() {
       }
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = stream;
+      cameraTrack?.addEventListener("ended", () => {
+        if (streamRef.current !== stream) return;
+        cancelledRecordingRef.current = true;
+        stopRecording();
+        streamRef.current = null;
+        setCameraReady(false);
+        setOrientationReady(false);
+        orientationRef.current = null;
+        setCameraError("Camera connection interrupted. Reconnect to continue; saved route progress will be kept.");
+        setCameraGuide("Reconnect the camera and continue this same half-circle.");
+      }, { once: true });
       torchSupportedRef.current = canControlTorch;
       setTorchSupported(canControlTorch);
       torchEnabledRef.current = false;
@@ -1011,17 +1038,21 @@ function App() {
         .find((type) => MediaRecorder.isTypeSupported(type));
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       recordingChunks.current = [];
-      if (!detailPass && (sector.id === "route-a" || !Number.isFinite(startingHeadingRef.current))) {
+      if (!detailPass && !Number.isFinite(startingHeadingRef.current)) {
         startingHeadingRef.current = orientationRef.current.alpha;
       }
       if (!detailPass) {
+        recordingCoverageStartRef.current = [...sectorCoverageRef.current];
         sectorCoverageRef.current = recordHeadingCoverage(
-          sector.id === "route-a" ? Array(24).fill(false) : sectorCoverageRef.current,
+          sectorCoverageRef.current,
           orientationRef.current.alpha,
           startingHeadingRef.current,
         );
+        setSectorProgress(getRouteCoverage(
+          sectorCoverageRef.current,
+          scanSectors.findIndex((route) => route.id === sector.id),
+        ).progress);
       }
-      setSectorProgress(0);
       cancelledRecordingRef.current = false;
       recorder.addEventListener("dataavailable", (event) => {
         if (event.data.size > 0) recordingChunks.current.push(event.data);
@@ -1031,19 +1062,31 @@ function App() {
         recordingChunks.current = [];
         recorderRef.current = null;
         setRecording(false);
-        const covered = detailPass
-          ? MIN_SECTOR_COVERAGE
-          : sectorCoverageRef.current
-            .slice(activeSectorIndexRef.current * 12, activeSectorIndexRef.current * 12 + 12)
-            .filter(Boolean).length;
-        if (cancelledRecordingRef.current) {
-          setCameraGuide("Route recording canceled.");
+        const elapsedSeconds = (Date.now() - recordingStartedAtRef.current) / 1000;
+        if (detailPass && cancelledRecordingRef.current) {
+          setCameraGuide("Close-up capture stopped. Reopen the camera and record the full close-up.");
         } else if (clip.size === 0) {
           setFormError("The recorded video is empty.");
-        } else if (covered < MIN_SECTOR_COVERAGE) {
-          setFormError("The camera did not move far enough, so the video was not saved. Follow the rotation marker and try again.");
-        } else {
+        } else if (!detailPass && elapsedSeconds < MIN_RECORDING_SECONDS) {
+          if (recordingCoverageStartRef.current) {
+            sectorCoverageRef.current = recordingCoverageStartRef.current;
+          }
+          const routeIndex = scanSectors.findIndex((route) => route.id === sector.id);
+          const coverage = getRouteCoverage(sectorCoverageRef.current, routeIndex);
+          setSectorProgress(coverage.progress);
+          setCameraGuide("Recording was too short to keep. Reopen the camera and continue this same route.");
+        } else if (detailPass) {
           void processVideoClip(clip, sector.id);
+        } else {
+          const routeIndex = scanSectors.findIndex((route) => route.id === sector.id);
+          routeVideoPartsRef.current[sector.id].push(clip);
+          const coverage = getRouteCoverage(sectorCoverageRef.current, routeIndex);
+          setSectorProgress(coverage.progress);
+          if (coverage.complete) {
+            void processVideoClip([...routeVideoPartsRef.current[sector.id]], sector.id);
+          } else {
+            setCameraGuide(`Saved ${coverage.progress}% of this route. Reopen the camera and continue the same half-circle; your footage and progress are kept.`);
+          }
         }
       }, { once: true });
       recorder.start(1000);
@@ -1068,8 +1111,9 @@ function App() {
   const stopCamera = () => {
     cancelledRecordingRef.current = true;
     stopRecording();
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    const stream = streamRef.current;
     streamRef.current = null;
+    stream?.getTracks().forEach((track) => track.stop());
     torchEnabledRef.current = false;
     torchSupportedRef.current = false;
     setTorchSupported(false);
@@ -1095,7 +1139,7 @@ function App() {
     event.preventDefault();
     setFormError("");
     setMessage("");
-    if (activeSectorIndexRef.current < captureStages.length || videoClipsRef.current.length !== captureStages.length) {
+    if (activeSectorIndexRef.current < captureStages.length || new Set(videoClipsRef.current.map((clip) => clip.sector)).size !== captureStages.length) {
       setFormError("Complete both full-item routes and the required 4K close-up before starting the scan.");
       return;
     }
@@ -1110,7 +1154,7 @@ function App() {
     setBusy(true);
     const form = new FormData();
     videoClipsRef.current.forEach(({ sector, file }) => {
-      form.append("videos", file, `${sector}.${file.name.split(".").at(-1)}`);
+      form.append("videos", file, file.name);
     });
     form.append("title", title.trim());
     form.append("description", description);
@@ -1311,7 +1355,7 @@ function App() {
                 </section>
                 {!draft ? (
                   <form className="scan-card-panel" onSubmit={startScan}>
-                    <div className="panel-heading"><span className="step-number">02</span><div><h2>Full-item and 4K close-up capture</h2><p>Complete both full-item routes and the separate 4K close-up.</p></div><span className="step-status">{videoClips.length}/{captureStages.length} captured</span></div>
+                    <div className="panel-heading"><span className="step-number">02</span><div><h2>Full-item and 4K close-up capture</h2><p>The two route stages are the first and second halves of one level orbit, moving in the same direction. Interrupted route footage is saved so you can continue later.</p></div><span className="step-status">{completedCaptureStageCount}/{captureStages.length} stages captured</span></div>
                     <div className="capture-tips">
                       <span className="tip-icon">✳</span>
                       <div><strong>After the full-item routes, move close and capture every side in 4K.</strong><p>For the final stage, keep the camera close and slowly rotate or turn the item over to capture its entire surface. At least {MIN_DETAIL_FRAMES} sharp frames are required from the 4K original. Listings are blocked if the check fails. This capture target is intended to help record 0.5 mm defects; it does not guarantee they will be visible.</p></div>
@@ -1345,7 +1389,6 @@ function App() {
                             {!objectSelection && <span className="camera-touch-prompt">Tap the item you want to sell</span>}
                             {objectSelection && <span className="selection-point" style={{ left: `${objectSelection.x * 100}%`, top: `${objectSelection.y * 100}%` }}><span>Selected point</span></span>}
                             {objectBounds && <span className="object-outline" style={{ left: `${objectBounds.left * 100}%`, top: `${objectBounds.top * 100}%`, width: `${(objectBounds.right - objectBounds.left) * 100}%`, height: `${(objectBounds.bottom - objectBounds.top) * 100}%` }} />}
-                            {objectBounds && targetDirection && <span className="direction-indicator" aria-live="polite"><strong>{targetDirection === "left" ? "←" : targetDirection === "right" ? "→" : "↑"}</strong> Move camera {targetDirection}</span>}
                             <span className={`camera-guide ${objectBounds ? "detected" : ""}`}>{cameraGuide}</span>
                           </div>
                         </div>
@@ -1373,8 +1416,8 @@ function App() {
                     </div>
                     <div className="scan-disclosure"><span>ⓘ</span> Original route videos are sent to the server for reconstruction. Item selection and live frame analysis run on your device. Browsers do not show a separate flash permission prompt; flash support is checked through the camera.</div>
                     {formError && <p className="form-error">{formError}</p>}
-                    <button className="button button-dark full-button" disabled={busy || processingVideo || recording || activeSectorIndex < captureStages.length || videoClips.length !== captureStages.length || files.length < MIN_IMAGES || !health?.reconstructionAvailable}>
-                      {busy ? "Uploading videos to the server…" : !health?.reconstructionAvailable ? "GPU reconstruction engine unavailable" : `Reconstruct 3D from ${videoClips.length} videos and ${files.length} frames →`}
+                    <button className="button button-dark full-button" disabled={busy || processingVideo || recording || activeSectorIndex < captureStages.length || completedCaptureStageCount !== captureStages.length || files.length < MIN_IMAGES || !health?.reconstructionAvailable}>
+                      {busy ? "Uploading videos to the server…" : !health?.reconstructionAvailable ? "GPU reconstruction engine unavailable" : `Reconstruct 3D from ${completedCaptureStageCount} capture stages and ${files.length} frames →`}
                     </button>
                     {!health?.reconstructionAvailable && <p className="engine-warning">{health?.colmapAvailable === false ? "COLMAP was not found." : ""}{health?.cudaAvailable === false ? " An NVIDIA GPU or nvidia-smi was not found." : ""}{health?.colmapCudaAvailable === false ? " The installed COLMAP build does not support CUDA." : ""} A CUDA-enabled COLMAP build and an NVIDIA GPU are required. Check the README setup instructions, then restart the server.</p>}
                   </form>
@@ -1390,14 +1433,14 @@ function App() {
                         {formError && <p className="form-error">{formError}</p>}
                         <button className="button button-dark full-button" disabled={busy}>{busy ? "Publishing…" : "Publish listing with completed 3D scan →"}</button>
                       </form>
-                      <div className="video-evidence-grid seller-video-evidence">{draft.videos.map((video) => <figure key={video.stage}><figcaption>{captureStages.find((stage) => stage.id === video.stage)?.label || video.stage}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${draft.id}/videos/${video.stage}`} /></figure>)}</div>
+                      <div className="video-evidence-grid seller-video-evidence">{draft.videos.map((video) => <figure key={video.name}><figcaption>{captureStages.find((stage) => stage.id === video.stage)?.label || video.stage}{video.name.includes("-part-") ? ` · Part ${video.name.match(/-part-(\d+)/)?.[1]}` : ""}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${draft.id}/videos/${encodeURIComponent(video.name)}`} /></figure>)}</div>
                       <button type="button" className="button button-outline full-button" disabled={busy} onClick={() => { setDraft(null); clearFrames(); setTitle(""); setPrice(""); setCategory("Electronics & cameras"); setDescription(""); setMessage(""); setFormError(""); }}>Scan another item</button>
                     </>}
                   </div>
                 )}
               </div>
               <aside className="scan-sidebar">
-                <div className="sidebar-card"><div className="eyebrow">SCAN QUALITY</div><h3>2 full rotations<br />1 4K close-up</h3><ol className="quality-list"><li><span>01</span><div><strong>Tap the item to sell</strong><p>Tap the item in the camera view to track its area on your device.</p></div></li><li><span>02</span><div><strong>Follow both full-item routes</strong><p>The orientation sensor guides the camera direction and where to aim.</p></div></li><li><span>03</span><div><strong>Rotate the item up close</strong><p>Record every side slowly in 4K, keeping the item large in frame.</p></div></li><li><span>04</span><div><strong>Verify source quality</strong><p>The server checks 4K resolution and focus, then saves sharp close-up frames.</p></div></li></ol></div>
+                <div className="sidebar-card"><div className="eyebrow">SCAN QUALITY</div><h3>One level orbit<br />split into two parts</h3><ol className="quality-list"><li><span>01</span><div><strong>Tap the item to sell</strong><p>Tap the item in the camera view to track its area on your device.</p></div></li><li><span>02</span><div><strong>Keep it centered as you orbit</strong><p>Move smoothly around the item in one direction. The first and second stages cover the two halves of the same orbit.</p></div></li><li><span>03</span><div><strong>Rotate the item up close</strong><p>Record every side slowly in 4K, keeping the item large in frame.</p></div></li><li><span>04</span><div><strong>Verify source quality</strong><p>The server checks 4K resolution and focus, then saves sharp close-up frames.</p></div></li></ol></div>
                 <div className="sidebar-note"><span>R.</span><p>0.5 mm is a capture design target, not a detection guarantee. If a defect is blurry, hidden, or missing from the source video, the model cannot reconstruct it.</p></div>
               </aside>
             </div>
@@ -1421,7 +1464,7 @@ function App() {
               <div className="originals-heading"><strong>Original capture frames</strong><span>Inspect the item and 3D result from multiple angles.</span></div>
               <div className="modal-originals">{selected.scan.images.map((image, index) => <img key={image} src={`/media/scans/${selected.scan.id}/images/${encodeURIComponent(image)}`} alt={`${selected.title} original photo ${index + 1}`} loading="lazy" />)}</div>
               {selected.scan.details?.length > 0 && <div className="detail-evidence"><h3>4K close-up surface photos · {selected.scan.details.length}</h3><p>Open photos at full resolution to inspect them. These are not automated defect assessments.</p><div>{selected.scan.details.map((frame, index) => <a key={frame.name} href={`/media/scans/${selected.scan.id}/details/${encodeURIComponent(frame.name)}`} target="_blank" rel="noreferrer"><img src={`/media/scans/${selected.scan.id}/details/${encodeURIComponent(frame.name)}`} alt={`${selected.title} close-up surface photo ${index + 1}`} loading="lazy" /><span>{frame.width}×{frame.height}</span></a>)}</div></div>}
-              {selected.scan.videos?.length > 0 && <div className="video-evidence"><h3>Full-item routes and close-up videos</h3><div className="video-evidence-grid">{selected.scan.videos.map((video) => <figure key={video.stage}><figcaption>{captureStages.find((stage) => stage.id === video.stage)?.label || video.stage}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${selected.scan.id}/videos/${video.stage}`} /></figure>)}</div></div>}
+              {selected.scan.videos?.length > 0 && <div className="video-evidence"><h3>Full-item routes and close-up videos</h3><div className="video-evidence-grid">{selected.scan.videos.map((video) => <figure key={video.name}><figcaption>{captureStages.find((stage) => stage.id === video.stage)?.label || video.stage}{video.name.includes("-part-") ? ` · Part ${video.name.match(/-part-(\d+)/)?.[1]}` : ""}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${selected.scan.id}/videos/${encodeURIComponent(video.name)}`} /></figure>)}</div></div>}
             </div>
           </article>
         </div>

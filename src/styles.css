@@ -328,8 +328,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .seller-byline { color: #777a70; font-size: 10px; }
 .selection-point { z-index: 1; box-shadow: 0 0 0 2px #27311e, 0 0 15px #e1ff83; }
 .selection-point > span { position: absolute; top: 24px; left: 50%; padding: 3px 6px; border-radius: 10px; background: #27311e; color: white; font-size: 8px; white-space: nowrap; transform: translateX(-50%); }
-.direction-indicator { position: absolute; top: 52px; left: 50%; display: flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 16px; background: #f9ffe9e8; color: #303b22; font-size: 10px; font-weight: 600; transform: translateX(-50%); pointer-events: none; }
-.direction-indicator strong { font-size: 18px; line-height: 1; }
 .recording-indicator { padding: 0 12px 12px; line-height: 1.6; text-align: center; }
 .recording-indicator > span.torch-on { background: #f0d477; box-shadow: 0 0 10px #f0d477; }
 .auth-panel, .inbox-panel { position: relative; width: min(560px,100%); max-height: min(820px,calc(100vh - 30px)); overflow: auto; padding: 28px; background: #fffefa; }

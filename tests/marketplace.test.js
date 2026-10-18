@@ -13,6 +13,7 @@ import {
   getAdaptiveScanGuidance,
   getDetailCaptureGuidance,
   getFramingGuidance,
+  getRouteCoverage,
   hasDetailCaptureFraming,
   measureLaplacianVariance,
   measureForegroundMask,
@@ -207,8 +208,8 @@ test("requires both guided video routes", async () => {
   assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
 
   const missingCloseup = new FormData();
-  for (const stage of ["route-a", "route-b"]) {
-    missingCloseup.append("videos", new Blob(["not an actual video"], { type: "video/mp4" }), `${stage}.mp4`);
+  for (const segment of ["route-a-part-1", "route-a-part-2", "route-b-part-1", "route-b-part-2"]) {
+    missingCloseup.append("videos", new Blob(["not an actual video"], { type: "video/mp4" }), `${segment}.mp4`);
   }
   missingCloseup.append("title", "Test product");
   missingCloseup.append("description", "Details");
@@ -239,7 +240,7 @@ test("measures a selected foreground and returns distance guidance", () => {
   assert.equal(measureForegroundMask(new Float32Array(10000).fill(1), 100, 100), null);
 });
 
-test("guides the camera across two direction sectors and measures illumination", () => {
+test("guides the camera across two orbit halves and measures illumination", () => {
   const coverage = Array(24).fill(false);
   assert.equal(normalizeDegrees(-15), 345);
   const firstHeading = recordHeadingCoverage(coverage, 350, 350);
@@ -250,17 +251,22 @@ test("guides the camera across two direction sectors and measures illumination",
   assert.equal(secondSector.slice(12).filter(Boolean).length, 1);
   const guidance = getAdaptiveScanGuidance({
     bounds: { left: 0.3, top: 0.3, right: 0.7, bottom: 0.7 },
-    previousBounds: { left: 0.31, top: 0.31, right: 0.71, bottom: 0.71 },
-    heading: 200,
-    startingHeading: 350,
     sectorIndex: 1,
     coverage: secondSector,
   });
-  assert.ok(guidance.aimPoint.x >= 0.49 && guidance.aimPoint.x <= 0.51);
   assert.equal(guidance.complete, false);
-  assert.equal(guidance.targetDirection, "left");
+  assert.doesNotMatch(guidance.message, /\b(left|right)\b/i);
+  assert.equal(getRouteCoverage(secondSector, 1).progress, 11);
   assert.equal(measureFrameBrightness(new Uint8ClampedArray([0, 0, 0, 255])), 0);
   assert.ok(measureFrameBrightness(new Uint8ClampedArray([255, 255, 255, 255])) > 254);
+});
+
+test("shows 100% route coverage at the completion threshold", () => {
+  const coverage = Array(24).fill(false);
+  coverage.fill(true, 0, 8);
+  assert.deepEqual(getRouteCoverage(coverage, 0), { covered: 8, progress: 89, complete: false });
+  coverage[8] = true;
+  assert.deepEqual(getRouteCoverage(coverage, 0), { covered: 9, progress: 100, complete: true });
 });
 
 test("requires close, uncropped framing and 4K resolution for defect evidence", () => {
@@ -359,8 +365,13 @@ test("requires both route videos and 20 high-resolution detail frames for listin
   const legacyScanId = crypto.randomUUID();
   const incompleteScanId = crypto.randomUUID();
   const videoScanId = crypto.randomUUID();
-  const stages = ["route-a", "route-b", "detail"];
-  const videos = stages.map((stage) => ({ stage, name: `${stage}.mp4` }));
+  const stages = ["route-a", "route-a", "route-b", "detail"];
+  const videos = [
+    { stage: "route-a", name: "route-a-part-1.mp4" },
+    { stage: "route-a", name: "route-a-part-2.mp4" },
+    { stage: "route-b", name: "route-b.mp4" },
+    { stage: "detail", name: "detail.mp4" },
+  ];
   const detailFrames = Array.from({ length: 20 }, (_, index) => ({
     name: `${String(index + 1).padStart(3, "0")}.jpg`,
     width: 3840,
@@ -408,7 +419,8 @@ test("requires both route videos and 20 high-resolution detail frames for listin
     insertScan.run(videoScanId, JSON.stringify(videos), JSON.stringify(detailFrames), "Video scan", "", "Other", 100, seller.id);
     await fs.promises.mkdir(videoDirectory, { recursive: true });
     await fs.promises.mkdir(detailDirectory, { recursive: true });
-    await fs.promises.writeFile(path.join(videoDirectory, "route-a.mp4"), Buffer.from("test video"));
+    await fs.promises.writeFile(path.join(videoDirectory, "route-a-part-1.mp4"), Buffer.from("test video"));
+    await fs.promises.writeFile(path.join(videoDirectory, "route-a-part-2.mp4"), Buffer.from("second route segment"));
     await fs.promises.writeFile(path.join(videoDirectory, "route-b.mp4"), Buffer.from("test video"));
     await fs.promises.writeFile(path.join(videoDirectory, "detail.mp4"), Buffer.from("test video"));
     await fs.promises.writeFile(path.join(detailDirectory, detailFrames[0].name), Buffer.from("test detail image"));
@@ -429,6 +441,9 @@ test("requires both route videos and 20 high-resolution detail frames for listin
     const media = await fetch(`${baseUrl}/media/scans/${videoScanId}/videos/route-a`);
     assert.equal(media.status, 200);
     assert.equal(await media.text(), "test video");
+    const routeSegmentMedia = await fetch(`${baseUrl}/media/scans/${videoScanId}/videos/route-a-part-2.mp4`);
+    assert.equal(routeSegmentMedia.status, 200);
+    assert.equal(await routeSegmentMedia.text(), "second route segment");
     const detailMedia = await fetch(`${baseUrl}/media/scans/${videoScanId}/details/${detailFrames[0].name}`);
     assert.equal(detailMedia.status, 200);
     assert.equal(await detailMedia.text(), "test detail image");

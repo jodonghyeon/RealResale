@@ -42,6 +42,7 @@ const idPattern = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{1
 const maxScanBytes = 512 * 1024 * 1024;
 const maxVideoSeconds = 45;
 const maxTotalVideoSeconds = 90;
+const maxVideoUploadFiles = 19;
 const scryptAsync = promisify(crypto.scrypt);
 const sessionCookieName = "realresale_session";
 const sessionLifetimeMs = 30 * 24 * 60 * 60 * 1000;
@@ -302,7 +303,7 @@ const videoUpload = multer({
     destination: (_req, _file, callback) => callback(null, incomingDir),
     filename: (_req, _file, callback) => callback(null, `${crypto.randomUUID()}.upload`),
   }),
-  limits: { files: requiredVideoStages.length, fileSize: maxScanBytes },
+  limits: { files: maxVideoUploadFiles, fileSize: maxScanBytes },
   fileFilter: (_req, file, callback) => {
     const supportedType = ["video/mp4", "video/quicktime", "video/webm", "video/x-m4v"].includes(file.mimetype);
     const supportedExtension = /\.(mov|mp4|m4v|webm)$/i.test(file.originalname);
@@ -583,63 +584,69 @@ async function extractVideoFrames(scanId, directory, videos) {
           : `Record the ${video.stage} video for 3–${maxVideoSeconds} seconds.`,
       );
     }
-    durations.set(video.stage, duration);
+    durations.set(video.name, duration);
   }
-  const routeDuration = videoSectors.reduce((total, stage) => total + (durations.get(stage) || 0), 0);
+  const routeDuration = videos
+    .filter((video) => videoSectors.includes(video.stage))
+    .reduce((total, video) => total + durations.get(video.name), 0);
   if (routeDuration > maxTotalVideoSeconds) {
-    throw new Error("The combined duration of the two route videos exceeds the limit. Review the route videos.");
+    throw new Error("The combined duration of the two routes exceeds the limit. Review the route videos.");
   }
 
   const imageNames = [];
-  const routeVideos = videos.filter((video) => videoSectors.includes(video.stage));
-  for (let index = 0; index < routeVideos.length; index += 1) {
-    const video = routeVideos[index];
+  for (let index = 0; index < videoSectors.length; index += 1) {
+    const stage = videoSectors[index];
+    const routeVideos = videos.filter((video) => video.stage === stage);
+    const stageDuration = routeVideos.reduce((total, video) => total + durations.get(video.name), 0);
     const sectorImageStart = imageNames.length;
-    const frameLimit = Math.floor(maxImageCount / routeVideos.length);
-    const fps = Math.min(1.5, frameLimit / durations.get(video.stage));
-    const stageDirectory = path.join(extractedDirectory, video.stage);
-    await fs.mkdir(stageDirectory, { recursive: true });
-    await runFfmpeg(
-      [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        path.join(videoDirectory, video.name),
-        "-vf",
-        `fps=${fps.toFixed(5)},scale=3840:3840:force_original_aspect_ratio=decrease`,
-        "-frames:v",
-        String(frameLimit),
-        "-q:v",
-        "2",
-        path.join(stageDirectory, "%03d.jpg"),
-        "-y",
-      ],
-      `Extracting sharp frames from the ${video.stage} video`,
-    );
-    const frameFiles = (await fs.readdir(stageDirectory))
-      .filter((name) => /^\d{3}\.jpg$/.test(name))
-      .sort((left, right) => Number(path.parse(left).name) - Number(path.parse(right).name));
-    for (const filename of frameFiles) {
-      const imagePath = path.join(stageDirectory, filename);
-      const metadata = await sharp(imagePath).metadata();
-      if (!metadata.width || !metadata.height || Math.min(metadata.width, metadata.height) < 600) {
-        continue;
+    const frameLimit = Math.floor(maxImageCount / videoSectors.length);
+    for (const video of routeVideos) {
+      const duration = durations.get(video.name);
+      const segmentFrameLimit = Math.max(1, Math.floor(frameLimit * duration / stageDuration));
+      const stageDirectory = path.join(extractedDirectory, stage, path.parse(video.name).name);
+      await fs.mkdir(stageDirectory, { recursive: true });
+      await runFfmpeg(
+        [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-i",
+          path.join(videoDirectory, video.name),
+          "-vf",
+          `fps=${Math.min(1.5, segmentFrameLimit / duration).toFixed(5)},scale=3840:3840:force_original_aspect_ratio=decrease`,
+          "-frames:v",
+          String(segmentFrameLimit),
+          "-q:v",
+          "2",
+          path.join(stageDirectory, "%03d.jpg"),
+          "-y",
+        ],
+        `Extracting sharp frames from a ${stage} route segment`,
+      );
+      const frameFiles = (await fs.readdir(stageDirectory))
+        .filter((name) => /^\d{3}\.jpg$/.test(name))
+        .sort((left, right) => Number(path.parse(left).name) - Number(path.parse(right).name));
+      for (const filename of frameFiles) {
+        const imagePath = path.join(stageDirectory, filename);
+        const metadata = await sharp(imagePath).metadata();
+        if (!metadata.width || !metadata.height || Math.min(metadata.width, metadata.height) < 600) {
+          continue;
+        }
+        const outputName = `${String(imageNames.length + 1).padStart(3, "0")}.jpg`;
+        await fs.copyFile(imagePath, path.join(imagesDirectory, outputName));
+        imageNames.push(outputName);
       }
-      const outputName = `${String(imageNames.length + 1).padStart(3, "0")}.jpg`;
-      await fs.copyFile(imagePath, path.join(imagesDirectory, outputName));
-      imageNames.push(outputName);
     }
     const sectorImageCount = imageNames.length - sectorImageStart;
     if (sectorImageCount < minFramesPerSector) {
       throw new Error(
-        `Only ${sectorImageCount} valid frames were extracted from the ${video.stage} route. Each route requires at least ${minFramesPerSector} frames.`,
+        `Only ${sectorImageCount} valid frames were extracted from the ${stage} route. Each route requires at least ${minFramesPerSector} frames.`,
       );
     }
     await setProgress(
       scanId,
-      `Checking frames from the ${video.stage} route`,
-      Math.min(20, 2 + Math.floor(((index + 1) / routeVideos.length) * 18)),
+      `Checking frames from the ${stage} route`,
+      Math.min(20, 2 + Math.floor(((index + 1) / videoSectors.length) * 18)),
     );
   }
 
@@ -1176,7 +1183,7 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
     res.status(413).json({ error: "The total size of the capture videos must not exceed 512 MB." });
     return;
   }
-  videoUpload.array("videos", requiredVideoStages.length)(req, res, async (uploadError) => {
+  videoUpload.array("videos", maxVideoUploadFiles)(req, res, async (uploadError) => {
     const files = req.files || [];
     if (uploadError) {
       await cleanupUploads(files);
@@ -1184,13 +1191,24 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
       return;
     }
     const { title, description = "", category, price } = req.body || {};
-    const stages = files.map((file) => path.basename(file.originalname, path.extname(file.originalname)).toLowerCase());
+    const videoDescriptors = files.map((file) => {
+      const basename = path.basename(file.originalname, path.extname(file.originalname)).toLowerCase();
+      const routeMatch = /^(route-a|route-b)(?:-part-([1-9]\d*))?$/.exec(basename);
+      return {
+        basename,
+        stage: routeMatch?.[1] || (basename === detailVideoStage ? detailVideoStage : null),
+      };
+    });
     const totalBytes = files.reduce((total, file) => total + file.size, 0);
     const parsedPrice = Number(price);
+    const videoNames = videoDescriptors.map(({ basename }) => basename);
+    const hasEachRoute = videoSectors.every((stage) => videoDescriptors.some((video) => video.stage === stage));
     if (
-      files.length !== requiredVideoStages.length ||
-      new Set(stages).size !== requiredVideoStages.length ||
-      requiredVideoStages.some((stage) => !stages.includes(stage))
+      files.length < requiredVideoStages.length ||
+      videoDescriptors.some((video) => !video.stage) ||
+      new Set(videoNames).size !== files.length ||
+      !hasEachRoute ||
+      videoDescriptors.filter((video) => video.stage === detailVideoStage).length !== 1
     ) {
       await cleanupUploads(files);
       res.status(400).json({ error: "Two route videos and one high-resolution close-up video are required." });
@@ -1233,9 +1251,9 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
     const scanId = crypto.randomUUID();
     const directory = path.join(scanDir, scanId);
     const videoDirectory = path.join(directory, "videos");
-    const videos = files.map((file) => ({
-      stage: path.basename(file.originalname, path.extname(file.originalname)).toLowerCase(),
-      name: `${path.basename(file.originalname, path.extname(file.originalname)).toLowerCase()}${path.extname(file.originalname).toLowerCase()}`,
+    const videos = files.map((file, index) => ({
+      stage: videoDescriptors[index].stage,
+      name: `${videoDescriptors[index].basename}${path.extname(file.originalname).toLowerCase()}`,
     }));
     try {
       await fs.mkdir(videoDirectory, { recursive: true });
@@ -1527,9 +1545,9 @@ app.get("/media/scans/:id/images/:filename", async (req, res, next) => {
 app.get("/media/scans/:id/videos/:stage", async (req, res, next) => {
   try {
     const row = idPattern.test(req.params.id) ? getScan.get(req.params.id) : null;
-    const video = row && row.status === "ready"
-      ? JSON.parse(row.videos_json || "[]").find((item) => item.stage === req.params.stage)
-      : null;
+    const videos = row && row.status === "ready" ? JSON.parse(row.videos_json || "[]") : [];
+    const video = videos.find((item) => item.name === req.params.stage) ||
+      videos.find((item) => item.stage === req.params.stage);
     if (!video) {
       res.status(404).json({ error: "Original capture video not found." });
       return;
@@ -1582,7 +1600,7 @@ app.use((error, _req, res, _next) => {
     }
     if (error.code === "LIMIT_FILE_COUNT") {
       if (error.field === "videos") {
-        res.status(413).json({ error: `You can upload at most ${requiredVideoStages.length} capture videos.` });
+        res.status(413).json({ error: `You can upload at most ${maxVideoUploadFiles} capture videos.` });
         return;
       }
       res.status(413).json({ error: `You can upload at most ${maxImageCount} images at a time.` });
