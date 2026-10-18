@@ -626,7 +626,7 @@ async function extractSingleVideoFrames(scanId, directory, video) {
   const imageNames = [];
   for (const [index, frame] of selected.entries()) {
     const name = `${String(index + 1).padStart(3, "0")}.jpg`;
-    await fs.copyFile(path.join(candidateDirectory, frame.filename), path.join(imagesDirectory, name));
+    await fs.copyFile(path.join(candidateDirectory, frame.filename), path.join(directory, name));
     imageNames.push(name);
   }
   await fs.rm(candidateDirectory, { recursive: true, force: true });
@@ -712,7 +712,7 @@ async function extractVideoFrames(scanId, directory, videos) {
           continue;
         }
         const outputName = `${String(imageNames.length + 1).padStart(3, "0")}.jpg`;
-        await fs.copyFile(imagePath, path.join(imagesDirectory, outputName));
+        await fs.copyFile(imagePath, path.join(directory, outputName));
         imageNames.push(outputName);
       }
     }
