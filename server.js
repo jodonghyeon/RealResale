@@ -1214,7 +1214,7 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
       parsedPrice > 1_000_000_000
     ) {
       await cleanupUploads(files);
-      res.status(400).json({ error: "Enter a valid title, description, category, and price between 0 and 1,000,000,000 KRW." });
+      res.status(400).json({ error: "Enter a valid title, description, category, and price between $0 and $1,000,000,000 USD." });
       return;
     }
     if (runningJobs + jobQueue.length >= maxScansInFlight + maxQueuedScans) {
@@ -1297,7 +1297,7 @@ app.put("/api/scans/:id/details", requireAuth, (req, res) => {
     parsedPrice < 0 ||
     parsedPrice > 1_000_000_000
   ) {
-    res.status(400).json({ error: "Enter a valid title, description, category, and price between 0 and 1,000,000,000 KRW." });
+    res.status(400).json({ error: "Enter a valid title, description, category, and price between $0 and $1,000,000,000 USD." });
     return;
   }
   const scan = getScan.get(req.params.id);
@@ -1335,7 +1335,7 @@ app.post("/api/listings", (req, res) => {
     typeof scanId !== "string" ||
     !idPattern.test(scanId)
   ) {
-    res.status(400).json({ error: "Enter a valid title, description, category, and price between 0 and 1,000,000,000 KRW." });
+    res.status(400).json({ error: "Enter a valid title, description, category, and price between $0 and $1,000,000,000 USD." });
     return;
   }
 

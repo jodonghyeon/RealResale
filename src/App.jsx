@@ -33,7 +33,7 @@ const captureStages = [
   ...scanSectors,
   { id: "detail", label: "4K close-up capture", target: "Move closer to the item" },
 ];
-const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "KRW", maximumFractionDigits: 0 });
+const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 const displayCategory = (category) => category;
 const Viewer = lazy(() => import("./Viewer.jsx"));
 
@@ -1305,7 +1305,7 @@ function App() {
                 <section className="scan-card-panel seller-details">
                   <div className="panel-heading"><span className="step-number">01</span><div><h2>Enter item details first</h2><p>Add details before reconstruction; you can edit them while it runs.</p></div></div>
                   <label>Item title<input required maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="e.g. Mirrorless camera in good condition" /></label>
-                  <div className="input-row"><label>Price (KRW)<input required type="number" min="0" max="1000000000" step="1" value={price} onChange={(event) => setPrice(event.target.value)} placeholder="300000" /></label><label>Category<select value={category} onChange={(event) => setCategory(event.target.value)}><option>Electronics & cameras</option><option>Fashion & clothing</option><option>Furniture & home</option><option>Home & hobbies</option><option>Other</option></select></label></div>
+                  <div className="input-row"><label>Price (USD)<input required type="number" min="0" max="1000000000" step="1" value={price} onChange={(event) => setPrice(event.target.value)} placeholder="300" /></label><label>Category<select value={category} onChange={(event) => setCategory(event.target.value)}><option>Electronics & cameras</option><option>Fashion & clothing</option><option>Furniture & home</option><option>Home & hobbies</option><option>Other</option></select></label></div>
                   <label>Item description<textarea maxLength={2000} rows="4" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Include how long it was used, repair history, and any scratches or damage you have found." /></label>
                   {draft && <button type="button" className="button button-outline full-button" disabled={busy} onClick={() => void saveDraftDetails()}>Save item details</button>}
                 </section>

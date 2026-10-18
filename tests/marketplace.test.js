@@ -282,6 +282,16 @@ test("requires close, uncropped framing and 4K resolution for defect evidence", 
 });
 
 test("rejects direct listing submissions and untrusted browser origins", async () => {
+  const invalidUsdPrice = await requestListing({
+    title: "Invalid price",
+    description: "",
+    category: "Other",
+    price: 1.5,
+    scanId: crypto.randomUUID(),
+  });
+  assert.equal(invalidUsdPrice.status, 400);
+  assert.match((await invalidUsdPrice.json()).error, /\$0 and \$1,000,000,000 USD/);
+
   const rejectedListing = await requestListing({
     title: "Unscanned item",
     description: "",
