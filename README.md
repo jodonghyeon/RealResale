@@ -1,11 +1,11 @@
 # RealResale
 
-A PC-hosted secondhand marketplace MVP with an iPhone Safari capture experience.
-Sellers create a local account, enter listing details, and record two guided
-camera-movement passes. On-device product segmentation and orientation history
-guide each pass; the server extracts frames and runs COLMAP. Only a completed
-server-generated color point cloud can be listed. Buyers can inspect listings
-and send private messages to sellers.
+A secondhand marketplace MVP with an iPhone Safari capture experience. Sellers
+record two guided whole-item camera passes and one required 4K close-up pass.
+On-device product segmentation and orientation history guide capture; the
+server validates close-up resolution and sharpness, runs COLMAP on the whole-item
+passes, and stores close-up evidence images separately. Buyers can inspect
+listings and send private messages to sellers.
 
 ## Requirements
 
@@ -247,23 +247,34 @@ the project does not create cloud resources or incur charges until those steps.
    (24 total). The original two clips are uploaded to the PC-hosted server;
    their combined size is limited to 512 MB. The server independently extracts
    frames, verifies image dimensions, and runs additional registration checks.
-5. COLMAP runs feature extraction and matching, camera alignment, dense stereo,
-   and point-cloud fusion. The platform stores and displays the RGB PLY point
-   cloud rather than a mesh; this retains color but is not a guarantee that tiny
-   scratches will be reconstructed or visible.
-6. A seller cannot submit a listing until the server marks its reconstruction
-   `ready`. Existing listings are public. Buyers can inspect the model, source
-   photos, and both original videos, and start a private one-to-one conversation
-   with the seller. Only the buyer and seller can read or send messages in that
-   conversation.
+5. A required 20–30 second close-up video is captured at 4K source resolution.
+   The server independently extracts candidate images, requires at least 20
+   sharp frames whose longest dimension is at least 3840 pixels, and keeps those
+   images as full-resolution condition evidence. The app also requires the
+   selected product mask to fill 55–88% of the camera view before close-up
+   recording starts.
+6. COLMAP runs feature extraction and matching, camera alignment, dense stereo,
+   and point-cloud fusion using the two whole-item passes. Close-up frames are
+   deliberately kept out of that whole-item reconstruction: mixing macro
+   views into one model can destabilize camera registration. The RGB PLY is not
+   the detail evidence; buyers open the separate 4K images and original close-up
+   video to inspect surface condition.
+7. A seller cannot submit a listing unless the server marks reconstruction
+   `ready`, the required close-up video exists, and at least 20 high-resolution
+   frames pass the server's sharpness filter. Buyers can inspect the model,
+   source photos, close-up evidence, and all three original videos, then start
+   a private one-to-one conversation with the seller.
 
 The two heading sectors are a capture guide, not proof that every physical
 surface was actually shown. The browser cannot reliably verify that the phone
-orbited the product rather than rotating in place. Background segmentation
-currently guides live framing only; it is not applied to server reconstruction.
-Neither the 3D model nor captured originals guarantee that every defect is
-visible. Existing image-only scans cannot be listed through the updated API:
-the scan must belong to the authenticated user and contain both captured paths.
+orbited the product rather than rotating in place. The 4K close-up and its
+quality gates increase the chance that a roughly 0.5 mm flaw is represented in
+the submitted evidence, but do not detect flaws automatically or guarantee that
+any particular defect is visible. Focus, lens quality, lighting, distance,
+surface reflectivity, and occlusion all matter; test real items and compare
+against known defects before relying on this for resale decisions. Background
+segmentation currently guides live framing only; it is not applied to server
+reconstruction.
 
 Accounts use local usernames and scrypt-hashed passwords. Sessions use an
 HttpOnly cookie. Email verification and password recovery are not implemented.

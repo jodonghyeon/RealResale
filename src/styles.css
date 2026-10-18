@@ -209,6 +209,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .originals-strip { display: flex; align-items: center; gap: 5px; height: 45px; }
 .originals-strip img { width: 42px; height: 42px; }
 .originals-strip > span { margin-left: 5px; color: #808278; font-size: 9px; }
+.detail-evidence { margin: 20px 0; padding: 14px; background: #f4f4ee; }
+.detail-evidence h3 { margin: 0; font-size: 12px; }
+.detail-evidence > p { margin: 5px 0 12px; color: #777a70; font-size: 9px; line-height: 1.7; }
+.detail-evidence > div { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 7px; }
+.detail-evidence a { position: relative; display: block; aspect-ratio: 1; overflow: hidden; background: #e4e5dd; }
+.detail-evidence img { width: 100%; height: 100%; object-fit: cover; transition: transform .2s; }
+.detail-evidence a:hover img { transform: scale(1.15); }
+.detail-evidence a span { position: absolute; right: 4px; bottom: 4px; padding: 3px 5px; background: #161912cf; color: white; font-family: "DM Mono",monospace; font-size: 7px; }
 .video-evidence { margin-top: 24px; }
 .video-evidence h3 { font-size: 13px; }
 .video-evidence-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
@@ -289,6 +297,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .modal-view { height: 290px; }
   .modal-content { padding: 16px; }
   .modal-originals { grid-template-columns: repeat(4,minmax(0,1fr)); }
+  .detail-evidence > div { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .video-evidence-grid { grid-template-columns: 1fr; }
   .camera-viewport { aspect-ratio: 3 / 4; max-height: min(62vh,620px); }
   .camera-controls { position: sticky; bottom: 0; z-index: 2; background: #22251f; padding-bottom: max(12px,env(safe-area-inset-bottom)); }

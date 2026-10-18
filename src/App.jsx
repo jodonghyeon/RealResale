@@ -1,7 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   getAdaptiveScanGuidance,
+  getDetailCaptureGuidance,
+  hasDetailCaptureFraming,
   recordHeadingCoverage,
+  supportsDetailCaptureResolution,
 } from "./scan-guidance.js";
 
 const MIN_IMAGES = 24;
@@ -12,6 +15,10 @@ const MAX_VIDEO_SECONDS = 45;
 const CAMERA_PASS_SECONDS = 45;
 const MIN_SECTOR_COVERAGE = 9;
 const MIN_RECORDING_SECONDS = 8;
+const MIN_DETAIL_FRAMES = 20;
+const MIN_DETAIL_VIDEO_SECONDS = 20;
+const DETAIL_RECORDING_SECONDS = 30;
+const MIN_DETAIL_RESOLUTION = 3840;
 const DARKNESS_THRESHOLD = 48;
 const BRIGHTNESS_RECOVERY_THRESHOLD = 72;
 const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
@@ -21,6 +28,10 @@ const MAX_FRAME_DIMENSION = 2560;
 const scanSectors = [
   { id: "route-a", label: "전체 회전 1/2", target: "상단 표식" },
   { id: "route-b", label: "전체 회전 2/2", target: "하단 표식" },
+];
+const captureStages = [
+  ...scanSectors,
+  { id: "detail", label: "4K 근접 결함 촬영", target: "상품을 가까이" },
 ];
 const money = new Intl.NumberFormat("ko-KR");
 const Viewer = lazy(() => import("./Viewer.jsx"));
@@ -60,8 +71,8 @@ function canvasToBlob(canvas, type, quality) {
   });
 }
 
-function analyzeFrame(video) {
-  const width = 320;
+function analyzeFrame(video, analysisWidth = 320) {
+  const width = analysisWidth;
   const height = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * width));
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -221,6 +232,12 @@ function App() {
   }, [frames]);
 
   const files = frames.map((frame) => frame.file);
+  const activeCaptureStage = captureStages[activeSectorIndex] || null;
+  const cameraSettings = streamRef.current?.getVideoTracks()[0]?.getSettings?.();
+  const detailCaptureReady = activeCaptureStage?.id !== "detail" || (
+    supportsDetailCaptureResolution(cameraSettings?.width, cameraSettings?.height) &&
+    hasDetailCaptureFraming(objectBounds)
+  );
 
   const clearFrames = () => {
     framesRef.current = [];
@@ -321,7 +338,14 @@ function App() {
         if (bounds) {
           const orientation = orientationRef.current;
           const recorder = recorderRef.current;
-          if (
+          const activeStage = captureStages[activeSectorIndexRef.current];
+          const detailPass = activeStage?.id === "detail";
+          if (detailPass && recorder?.state === "recording") {
+            const elapsedSeconds = (Date.now() - recordingStartedAtRef.current) / 1000;
+            setSectorProgress(Math.min(100, Math.round((elapsedSeconds / DETAIL_RECORDING_SECONDS) * 100)));
+            if (elapsedSeconds >= DETAIL_RECORDING_SECONDS) recorder.stop();
+          } else if (
+            !detailPass &&
             recorder?.state === "recording" &&
             orientation &&
             Number.isFinite(startingHeadingRef.current)
@@ -341,34 +365,49 @@ function App() {
               recorder.stop();
             }
           }
-          const guidance = getAdaptiveScanGuidance({
-            bounds,
-            previousBounds: previousBoundsRef.current,
-            heading: orientation?.alpha,
-            startingHeading: startingHeadingRef.current,
-            sectorIndex: activeSectorIndexRef.current,
-            coverage: sectorCoverageRef.current,
-          });
-          setTargetDirection(guidance.targetDirection || "직진");
-          const point = guidance.aimPoint;
+          const point = {
+            x: (bounds.left + bounds.right) / 2,
+            y: (bounds.top + bounds.bottom) / 2,
+          };
           selectionRef.current = point;
           setObjectSelection(point);
-          previousBoundsRef.current = bounds;
-          if (!cameraReady) {
-            setCameraGuide("화면 중앙의 표식에 상품 중심을 맞추고 경로 촬영을 시작하세요.");
-          } else if (
-            brightnessLevel < DARKNESS_THRESHOLD &&
-            !torchEnabledRef.current &&
-            torchSupportedRef.current
-          ) {
-            setCameraGuide("플래시를 켜는 중입니다. 밝기 확인이 끝날 때까지 기다리세요.");
-          } else if (brightnessLevel < DARKNESS_THRESHOLD && !torchEnabledRef.current) {
-            setCameraGuide("조명이 부족합니다. 주변 조명을 켜면 촬영할 수 있어요.");
-          } else if (!recorder || recorder.state !== "recording") {
-            setCameraGuide(guidance.complete ? "이 경로를 촬영했습니다. 다음 이동 경로로 이어가세요." : "화면 중앙 표식에 상품을 맞춘 뒤 회전 촬영을 시작하세요.");
+          if (detailPass) {
+            setTargetDirection("직진");
+            const detailGuidance = getDetailCaptureGuidance(bounds);
+            if (brightnessLevel < DARKNESS_THRESHOLD && !torchEnabledRef.current) {
+              setCameraGuide("근접 촬영에는 밝은 조명이 필요해요. 조명을 켜고 다시 확인하세요.");
+            } else if (recorder?.state === "recording") {
+              setCameraGuide(detailGuidance);
+            } else {
+              setCameraGuide(detailGuidance);
+            }
           } else {
-            setCameraGuide(guidance.message);
+            const guidance = getAdaptiveScanGuidance({
+              bounds,
+              previousBounds: previousBoundsRef.current,
+              heading: orientation?.alpha,
+              startingHeading: startingHeadingRef.current,
+              sectorIndex: activeSectorIndexRef.current,
+              coverage: sectorCoverageRef.current,
+            });
+            setTargetDirection(guidance.targetDirection || "직진");
+            if (!cameraReady) {
+              setCameraGuide("화면 중앙의 표식에 상품 중심을 맞추고 경로 촬영을 시작하세요.");
+            } else if (
+              brightnessLevel < DARKNESS_THRESHOLD &&
+              !torchEnabledRef.current &&
+              torchSupportedRef.current
+            ) {
+              setCameraGuide("플래시를 켜는 중입니다. 밝기 확인이 끝날 때까지 기다리세요.");
+            } else if (brightnessLevel < DARKNESS_THRESHOLD && !torchEnabledRef.current) {
+              setCameraGuide("조명이 부족합니다. 주변 조명을 켜면 촬영할 수 있어요.");
+            } else if (!recorder || recorder.state !== "recording") {
+              setCameraGuide(guidance.complete ? "이 경로를 촬영했습니다. 다음 이동 경로로 이어가세요." : "화면 중앙 표식에 상품을 맞춘 뒤 회전 촬영을 시작하세요.");
+            } else {
+              setCameraGuide(guidance.message);
+            }
           }
+          previousBoundsRef.current = bounds;
         } else {
           setTargetDirection("직진");
           setCameraGuide("상품이 화면에서 벗어났습니다. 다시 화면 안에 맞추세요.");
@@ -669,14 +708,17 @@ function App() {
   };
 
   const processVideoClip = async (clip, sectorId) => {
-    if (framesRef.current.length >= MAX_IMAGES) {
+    const detailPass = sectorId === "detail";
+    if (!detailPass && framesRef.current.length >= MAX_IMAGES) {
       setFormError(`선별 프레임은 최대 ${MAX_IMAGES}장까지 사용할 수 있어요.`);
       return;
     }
     setProcessingVideo(true);
     setCameraError("");
     setFormError("");
-    setFrameReport("촬영한 경로에서 선명하고 서로 다른 시점을 선별하고 있어요.");
+    setFrameReport(detailPass
+      ? "4K 근접 영상에서 초점이 선명한 결함 확인 프레임을 검사하고 있어요."
+      : "촬영한 경로에서 선명하고 서로 다른 시점을 선별하고 있어요.");
 
     const videoUrl = URL.createObjectURL(clip);
     const video = document.createElement("video");
@@ -691,21 +733,28 @@ function App() {
         video.addEventListener("error", () => reject(new Error("촬영 영상을 읽지 못했어요. 카메라 경로를 다시 촬영하세요.")), { once: true });
         video.load();
       });
-      if (!Number.isFinite(video.duration) || video.duration < MIN_RECORDING_SECONDS) {
-        throw new Error("이동 경로가 충분히 기록되지 않았어요. 같은 경로를 다시 촬영하세요.");
+      const minimumDuration = detailPass ? MIN_DETAIL_VIDEO_SECONDS : MIN_RECORDING_SECONDS;
+      const maximumDuration = detailPass ? DETAIL_RECORDING_SECONDS : MAX_VIDEO_SECONDS;
+      if (!Number.isFinite(video.duration) || video.duration < minimumDuration) {
+        throw new Error(detailPass
+          ? `근접 세부 촬영은 선명한 프레임을 확보하도록 ${MIN_DETAIL_VIDEO_SECONDS}초 이상 기록해야 해요.`
+          : "이동 경로가 충분히 기록되지 않았어요. 같은 경로를 다시 촬영하세요.");
       }
-      if (video.duration > MAX_VIDEO_SECONDS) {
-        throw new Error(`이동 경로 영상은 ${MAX_VIDEO_SECONDS}초 이하여야 해요.`);
+      if (video.duration > maximumDuration + 1) {
+        throw new Error(`촬영 영상은 ${maximumDuration}초 이하여야 해요.`);
       }
       if (!video.videoWidth || !video.videoHeight) {
         throw new Error("동영상에 읽을 수 있는 화면이 없어요.");
       }
+      if (detailPass && !supportsDetailCaptureResolution(video.videoWidth, video.videoHeight)) {
+        throw new Error(`근접 결함 촬영이 ${MIN_DETAIL_RESOLUTION}px 미만으로 기록됐어요. 기기에서 4K 촬영을 지원하는지 확인한 뒤 다시 촬영하세요.`);
+      }
 
-      const interval = Math.max(FRAME_SAMPLE_SECONDS, video.duration / MAX_VIDEO_CANDIDATES);
+      const interval = Math.max(detailPass ? 0.5 : FRAME_SAMPLE_SECONDS, video.duration / MAX_VIDEO_CANDIDATES);
       const candidates = [];
       for (let time = Math.min(0.15, video.duration / 4); time < video.duration - 0.08; time += interval) {
         await seekVideo(video, time);
-        candidates.push({ time, ...analyzeFrame(video) });
+        candidates.push({ time, ...analyzeFrame(video, detailPass ? 960 : 320) });
       }
       if (candidates.length === 0) {
         throw new Error("동영상에서 프레임을 추출하지 못했어요. 조금 더 길게 촬영해 주세요.");
@@ -714,7 +763,7 @@ function App() {
       const sharpnessValues = candidates.map((candidate) => candidate.sharpness).sort((left, right) => left - right);
       const lowerQuartile = sharpnessValues[Math.floor((sharpnessValues.length - 1) * 0.2)];
       const minimumSharpness = Math.max(8, lowerQuartile * 0.35);
-      const existingSignatures = framesRef.current.map((frame) => frame.signature);
+      const existingSignatures = detailPass ? [] : framesRef.current.map((frame) => frame.signature);
       const selected = [];
       let blurryCount = 0;
       let duplicateCount = 0;
@@ -730,8 +779,30 @@ function App() {
           duplicateCount += 1;
           continue;
         }
-        if (framesRef.current.length + selected.length >= MAX_IMAGES) break;
+        if (detailPass ? selected.length >= MIN_DETAIL_FRAMES * 2 : framesRef.current.length + selected.length >= MAX_IMAGES) break;
         selected.push(candidate);
+      }
+
+      if (detailPass) {
+        if (selected.length < MIN_DETAIL_FRAMES) {
+          throw new Error(`초점이 선명하고 서로 다른 근접 프레임이 ${MIN_DETAIL_FRAMES}장 미만이에요. 조명을 밝히고 물건을 더 천천히 돌려 다시 촬영하세요.`);
+        }
+        const currentBytes = videoClipsRef.current.reduce((total, savedClip) => total + savedClip.file.size, clip.size);
+        if (currentBytes > MAX_VIDEO_BYTES) {
+          throw new Error("전체 촬영 영상의 합계가 512MB를 넘어요.");
+        }
+        const extension = clip.type.includes("mp4") ? "mp4" : "webm";
+        const videoFile = new File([clip], `${sectorId}.${extension}`, { type: clip.type || "video/webm" });
+        videoClipsRef.current = [
+          ...videoClipsRef.current.filter((video) => video.sector !== sectorId),
+          { sector: sectorId, file: videoFile },
+        ];
+        setVideoClips(videoClipsRef.current);
+        setActiveSectorIndex(captureStages.length);
+        activeSectorIndexRef.current = captureStages.length;
+        setSectorProgress(100);
+        setFrameReport(`${selected.length}개의 선명한 4K 근접 프레임을 확인했어요. 서버가 초점과 원본 해상도를 다시 검사합니다.`);
+        return;
       }
 
       const extracted = [];
@@ -874,21 +945,35 @@ function App() {
       setCameraError("플래시와 밝기 확인이 끝난 뒤 이동 경로 촬영을 시작할 수 있습니다.");
       return;
     }
-    if (activeSectorIndexRef.current >= scanSectors.length) return;
+    const sector = captureStages[activeSectorIndexRef.current];
+    if (!sector) return;
+    const detailPass = sector.id === "detail";
+    if (detailPass) {
+      const settings = stream.getVideoTracks()[0]?.getSettings?.();
+      if (!supportsDetailCaptureResolution(settings?.width, settings?.height)) {
+        setCameraError(`미세 결함을 기록하려면 카메라가 4K (${MIN_DETAIL_RESOLUTION}px 이상)로 촬영해야 합니다. 기기의 카메라 해상도 설정을 확인하세요.`);
+        return;
+      }
+      if (!hasDetailCaptureFraming(objectBounds)) {
+        setCameraError("화면에서 상품이 잘리지 않으면서 화면의 55~88%를 차지하도록 가까이 맞춰 주세요.");
+        return;
+      }
+    }
     try {
       const mimeType = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"]
         .find((type) => MediaRecorder.isTypeSupported(type));
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       recordingChunks.current = [];
-      const sector = scanSectors[activeSectorIndexRef.current];
-      if (sector.id === "route-a" || !Number.isFinite(startingHeadingRef.current)) {
+      if (!detailPass && (sector.id === "route-a" || !Number.isFinite(startingHeadingRef.current))) {
         startingHeadingRef.current = orientationRef.current.alpha;
       }
-      sectorCoverageRef.current = recordHeadingCoverage(
-        sector.id === "route-a" ? Array(24).fill(false) : sectorCoverageRef.current,
-        orientationRef.current.alpha,
-        startingHeadingRef.current,
-      );
+      if (!detailPass) {
+        sectorCoverageRef.current = recordHeadingCoverage(
+          sector.id === "route-a" ? Array(24).fill(false) : sectorCoverageRef.current,
+          orientationRef.current.alpha,
+          startingHeadingRef.current,
+        );
+      }
       setSectorProgress(0);
       cancelledRecordingRef.current = false;
       recorder.addEventListener("dataavailable", (event) => {
@@ -899,9 +984,11 @@ function App() {
         recordingChunks.current = [];
         recorderRef.current = null;
         setRecording(false);
-        const covered = sectorCoverageRef.current
-          .slice(activeSectorIndexRef.current * 12, activeSectorIndexRef.current * 12 + 12)
-          .filter(Boolean).length;
+        const covered = detailPass
+          ? MIN_SECTOR_COVERAGE
+          : sectorCoverageRef.current
+            .slice(activeSectorIndexRef.current * 12, activeSectorIndexRef.current * 12 + 12)
+            .filter(Boolean).length;
         if (cancelledRecordingRef.current) {
           setCameraGuide("이 경로 촬영을 취소했습니다.");
         } else if (clip.size === 0) {
@@ -919,7 +1006,7 @@ function App() {
       setRecording(true);
       recordingTimeout.current = window.setTimeout(() => {
         if (recorder.state === "recording") recorder.stop();
-      }, CAMERA_PASS_SECONDS * 1000);
+      }, (detailPass ? DETAIL_RECORDING_SECONDS : CAMERA_PASS_SECONDS) * 1000);
     } catch (error) {
       setCameraError(error instanceof Error ? error.message : "동영상 촬영을 시작하지 못했어요.");
     }
@@ -959,8 +1046,8 @@ function App() {
     event.preventDefault();
     setFormError("");
     setMessage("");
-    if (activeSectorIndexRef.current < scanSectors.length || videoClipsRef.current.length !== scanSectors.length) {
-      setFormError("플랫폼 실시간 안내에 따른 두 이동 경로를 모두 촬영해야 스캔을 시작할 수 있어요.");
+    if (activeSectorIndexRef.current < captureStages.length || videoClipsRef.current.length !== captureStages.length) {
+      setFormError("두 전체 경로와 필수 4K 근접 결함 촬영을 모두 완료해야 스캔을 시작할 수 있어요.");
       return;
     }
     if (!title.trim() || !price || !Number.isSafeInteger(Number(price)) || Number(price) < 0) {
@@ -984,7 +1071,7 @@ function App() {
       const result = await request("/api/scans/videos", { method: "POST", body: form });
       setDraft(result.scan);
       notified.current.delete(result.scan.id);
-      setMessage("두 이동 경로의 촬영 원본과 상품 정보를 저장했어요. 서버에서 3D 재구성을 시작합니다.");
+      setMessage("전체 촬영과 4K 근접 원본을 저장했어요. 서버가 재구성 프레임과 결함 확인 이미지를 검사합니다.");
       refresh().catch(() => {});
     } catch (error) {
       setFormError(error.message);
@@ -1150,7 +1237,7 @@ function App() {
 
             <section className="trust-strip">
               <span className="trust-seal">R</span>
-              <p>판매자는 플랫폼의 실시간 안내에 따라 두 이동 경로를 촬영합니다. <strong>구매자는 컬러 3D 모델과 촬영 원본을 살펴보고 판매자에게 비공개 메시지를 보낼 수 있습니다.</strong></p>
+              <p>판매자는 전체 회전 두 경로와 4K 근접 촬영을 완료합니다. <strong>구매자는 3D 모델과 고해상도 표면 사진, 원본 영상을 확인하고 판매자에게 비공개 메시지를 보낼 수 있습니다.</strong></p>
               <button onClick={openScanner}>촬영 가이드 보기 <span>↗</span></button>
             </section>
           </>
@@ -1175,20 +1262,20 @@ function App() {
                 </section>
                 {!draft ? (
                   <form className="scan-card-panel" onSubmit={startScan}>
-                    <div className="panel-heading"><span className="step-number">02</span><div><h2>실시간 안내에 따라 이동 촬영</h2><p>상품을 선택하면 이전 프레임과 방향을 바탕으로 다음 이동을 안내합니다.</p></div><span className="step-status">{videoClips.length}/2 경로</span></div>
+                    <div className="panel-heading"><span className="step-number">02</span><div><h2>전체 촬영과 4K 근접 결함 촬영</h2><p>전체 2개 경로와 별도의 4K 근접 촬영을 모두 통과해야 해요.</p></div><span className="step-status">{videoClips.length}/{captureStages.length} 촬영</span></div>
                     <div className="capture-tips">
                       <span className="tip-icon">✳</span>
-                      <div><strong>화면의 상품 표식과 회전 방향을 따라 두 경로를 완료하세요.</strong><p>상품을 손으로 돌려가며 카메라를 천천히 이동합니다. 플랫폼은 흐린 장면과 겹치는 프레임을 제외하고, 선택한 상품만 서버 재구성에 사용합니다.</p></div>
+                      <div><strong>전체 촬영 후, 상품을 화면에 크게 담아 4K로 모든 면을 근접 촬영하세요.</strong><p>마지막 단계에서는 카메라를 상품 가까이 두고 물건을 천천히 돌리거나 뒤집어 표면 전체를 촬영합니다. 4K 원본에서 초점이 선명한 프레임을 최소 {MIN_DETAIL_FRAMES}장 검사하며, 실패하면 등록할 수 없습니다. 이는 0.5mm 결함을 촬영하기 위한 기준이지 발견을 보증하지는 않습니다.</p></div>
                     </div>
-                    <div className="surface-pass-list" aria-label="두 개의 이동 경로">
-                      {scanSectors.map((sector, index) => {
+                    <div className="surface-pass-list" aria-label="전체 표면 경로와 근접 촬영 단계">
+                      {captureStages.map((sector, index) => {
                         const complete = videoClips.some((clip) => clip.sector === sector.id);
                         const active = activeSectorIndex === index && !complete;
                         return <div key={sector.id} className={`surface-pass ${active ? "active" : ""} ${complete ? "complete" : ""}`} aria-current={active ? "step" : undefined}><span>{complete ? "✓" : String(index + 1).padStart(2, "0")}</span>{sector.label}</div>;
                       })}
                     </div>
-                    <div className="current-pass-tip"><strong>{activeSectorIndex < scanSectors.length ? scanSectors[activeSectorIndex].label : "두 이동 경로 완료"}</strong><span>{cameraGuide}</span></div>
-                    <div className="photo-counter"><span className="counter-track"><i style={{ width: `${sectorProgress}%` }} /></span><span><strong>{sectorProgress}%</strong> 현재 경로 방향 범위</span></div>
+                    <div className="current-pass-tip"><strong>{activeCaptureStage?.label || "필수 촬영 완료"}</strong><span>{cameraGuide}</span></div>
+                    <div className="photo-counter"><span className="counter-track"><i style={{ width: `${sectorProgress}%` }} /></span><span><strong>{sectorProgress}%</strong> {activeCaptureStage?.id === "detail" ? "근접 촬영 진행률" : "현재 경로 방향 범위"}</span></div>
                     {showCamera && (
                       <div className="camera-panel">
                         <div className="camera-viewport">
@@ -1211,10 +1298,10 @@ function App() {
                           </div>
                         </div>
                         <div className="camera-controls">
-                          <button type="button" className="button button-outline" disabled={processingVideo || recording || !segmenterReady || !objectBounds || !orientationReady || brightness === null || brightness < DARKNESS_THRESHOLD || activeSectorIndex >= scanSectors.length} onClick={startRecording}>● {recording ? "이동 경로 촬영 중…" : "이 경로 촬영 시작"}</button>
+                          <button type="button" className="button button-outline" disabled={processingVideo || recording || !segmenterReady || !objectBounds || !orientationReady || brightness === null || brightness < DARKNESS_THRESHOLD || !activeCaptureStage || !detailCaptureReady} onClick={startRecording}>● {recording ? "촬영 중…" : activeCaptureStage?.id === "detail" ? "4K 근접 결함 촬영 시작" : "이 경로 촬영 시작"}</button>
                           <button type="button" className="text-button" disabled={recording} onClick={stopCamera}>카메라 닫기</button>
                         </div>
-                        <p className="recording-indicator"><span className={torchEnabled ? "torch-on" : ""} />{recording ? `녹화 중 · ${sectorProgress}% · ${cameraGuide}` : `밝기 ${brightness === null ? "측정 중" : Math.round(brightness)} · 플래시 ${torchSupported ? (torchEnabled ? "켜짐" : "꺼짐") : "미지원 (밝은 환경 필요)"} · 방향 센서 ${orientationReady ? "연결됨" : "연결 중"}`}</p>
+                        <p className="recording-indicator"><span className={torchEnabled ? "torch-on" : ""} />{recording ? `녹화 중 · ${sectorProgress}% · ${cameraGuide}` : `카메라 ${cameraSettings?.width || "?"}×${cameraSettings?.height || "?"} · 밝기 ${brightness === null ? "측정 중" : Math.round(brightness)} · 플래시 ${torchSupported ? (torchEnabled ? "켜짐" : "꺼짐") : "미지원 (밝은 환경 필요)"} · 방향 센서 ${orientationReady ? "연결됨" : "연결 중"}`}</p>
                       </div>
                     )}
                     {cameraError && <p className="form-error">{cameraError}</p>}
@@ -1223,7 +1310,7 @@ function App() {
                         <span className="capture-icon">◎</span><strong>{showCamera ? "카메라 다시 연결" : "실시간 안내 촬영 시작"}</strong><span>카메라·방향 센서 권한이 필요해요. 지원 기기에서는 플래시를 자동 사용하고, 미지원 기기에서는 밝은 환경에서만 촬영할 수 있어요.</span>
                       </button>
                     </div>
-                    <div className="photo-counter"><span className="counter-track"><i style={{ width: `${Math.min((files.length / MIN_IMAGES) * 100, 100)}%` }} /></span><span><strong>{files.length}</strong> / 선명한 프레임 최소 {MIN_IMAGES}장 · 최대 {MAX_IMAGES}장</span></div>
+                    <div className="photo-counter"><span className="counter-track"><i style={{ width: `${Math.min((files.length / MIN_IMAGES) * 100, 100)}%` }} /></span><span><strong>{files.length}</strong> / 전체 3D 재구성용 프레임 최소 {MIN_IMAGES}장 · 최대 {MAX_IMAGES}장</span></div>
                     {processingVideo && <div className="frame-processing"><span className="spinner" /> 영상에서 흐림·중복 장면을 분석하고 있어요…</div>}
                     {frameReport && <p className="frame-report">{frameReport}</p>}
                     <div className="photo-grid">
@@ -1234,8 +1321,8 @@ function App() {
                     </div>
                     <div className="scan-disclosure"><span>ⓘ</span> 이동 경로 원본은 등록 시 서버로 전송되어 재구성됩니다. 상품 선택과 실시간 화면 분석은 기기 안에서 처리합니다. 브라우저는 플래시에 별도 권한 창을 제공하지 않으므로 카메라 권한과 플래시 지원 여부를 확인합니다.</div>
                     {formError && <p className="form-error">{formError}</p>}
-                    <button className="button button-dark full-button" disabled={busy || processingVideo || recording || activeSectorIndex < scanSectors.length || videoClips.length !== scanSectors.length || files.length < MIN_IMAGES || !health?.reconstructionAvailable}>
-                      {busy ? "동영상을 서버로 전송 중…" : !health?.reconstructionAvailable ? "GPU 재구성 엔진 확인 필요" : `두 이동 경로와 ${files.length}장 프레임으로 컬러 3D 생성 →`}
+                    <button className="button button-dark full-button" disabled={busy || processingVideo || recording || activeSectorIndex < captureStages.length || videoClips.length !== captureStages.length || files.length < MIN_IMAGES || !health?.reconstructionAvailable}>
+                      {busy ? "동영상을 서버로 전송 중…" : !health?.reconstructionAvailable ? "GPU 재구성 엔진 확인 필요" : `${videoClips.length}개 촬영과 ${files.length}장 프레임으로 3D 재구성 →`}
                     </button>
                     {!health?.reconstructionAvailable && <p className="engine-warning">{health?.colmapAvailable === false ? "COLMAP을 찾지 못했어요." : ""}{health?.cudaAvailable === false ? " NVIDIA GPU 또는 nvidia-smi를 찾지 못했어요." : ""}{health?.colmapCudaAvailable === false ? " 설치된 COLMAP에 CUDA 지원이 없어요." : ""} CUDA 지원 COLMAP과 NVIDIA GPU가 모두 필요해요. README 설치 안내를 확인한 뒤 서버를 다시 시작해 주세요.</p>}
                   </form>
@@ -1244,21 +1331,22 @@ function App() {
                     <div className="panel-heading"><span className="step-number">02</span><div><h2>{draft.status === "ready" ? "스캔 완료" : draft.status === "failed" ? "스캔 실패" : "서버에서 재구성 중"}</h2><p>{draft.imageCount}장의 사진 · {draft.id.slice(0, 8)}</p></div><span className={`scan-badge ${draft.status}`}>{draft.status === "ready" ? "RECONSTRUCTED" : draft.status.toUpperCase()}</span></div>
                     {(draft.status === "processing" || draft.status === "queued") && <div className="processing-state"><span className="spinner" /><div className="processing-details"><strong>{draft.status === "queued" ? "스캔 작업이 대기 중이에요." : "선별된 프레임에서 3D 표면을 계산하고 있어요."}</strong><p>이 작업은 컴퓨터 사양과 프레임 수에 따라 수 분 이상 걸릴 수 있습니다. 브라우저를 닫아도 상태는 유지돼요.</p><div className="progress-heading"><span>진행률 · 단계별 추정치</span><strong>{draft.progressPercent ?? 0}%</strong></div><div className="progress-track" role="progressbar" aria-label={`3D 재구성 진행률 ${draft.progressPercent ?? 0}%`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={draft.progressPercent ?? 0}><span style={{ width: `${draft.progressPercent ?? 0}%` }} /></div><span className="process-stage">{draft.progress || "서버 작업 대기 중"}</span></div></div>}
                     {draft.status === "failed" && <div className="failure-state"><strong>이 영상에서 선별한 프레임으로는 등록 가능한 3D 모델이 만들어지지 않았어요.</strong><p>{draft.error}</p><p>조명이 고르고 초점이 유지되는 환경에서 카메라를 천천히 이동해 다시 촬영해 주세요.</p><button type="button" className="button button-outline" onClick={() => { setDraft(null); clearFrames(); setMessage(""); }}>새로 스캔하기</button></div>}
-                    {draft.status === "ready" && <><div className="draft-model"><ModelPreview src={modelSrc(draft)} /><span className="model-tag"><span>◉</span> 고밀도 컬러 3D 점군</span></div><div className="scan-disclosure"><span>ⓘ</span> 3D 모델은 모든 외관 상태를 자동 검증하지 않습니다. 구매자는 두 이동 경로의 원본 영상과 선별 프레임도 확인할 수 있습니다.</div>
+                    {draft.status === "ready" && <><div className="draft-model"><ModelPreview src={modelSrc(draft)} /><span className="model-tag"><span>◉</span> 고밀도 컬러 3D 점군</span></div><div className="scan-disclosure"><span>ⓘ</span> 근접 사진은 높은 해상도의 원본 증거이며, AI가 모든 흠집을 자동 판정하거나 0.5mm 결함 발견을 보증하지는 않습니다.</div>
                       <form className="listing-form" onSubmit={publish}>
                         <div className="originals-strip">{draft.images.slice(0, 8).map((image, index) => <img key={image} src={`/media/scans/${draft.id}/images/${encodeURIComponent(image)}`} alt={`원본 스캔 이미지 ${index + 1}`} />)}<span>상품 상태 확인용 스캔 원본 {draft.imageCount}장</span></div>
+                        <div className="detail-evidence"><h3>4K 근접 표면 사진 · {draft.detailCount}장</h3><p>원본 해상도로 열어 작은 표면 흔적을 직접 확인하세요.</p><div>{draft.details.map((frame, index) => <a key={frame.name} href={`/media/scans/${draft.id}/details/${encodeURIComponent(frame.name)}`} target="_blank" rel="noreferrer"><img src={`/media/scans/${draft.id}/details/${encodeURIComponent(frame.name)}`} alt={`근접 표면 사진 ${index + 1}`} loading="lazy" /><span>{frame.width}×{frame.height}</span></a>)}</div></div>
                         {formError && <p className="form-error">{formError}</p>}
                         <button className="button button-dark full-button" disabled={busy}>{busy ? "등록 중…" : "완료된 3D 스캔으로 매물 등록하기 →"}</button>
                       </form>
-                      <div className="video-evidence-grid seller-video-evidence">{draft.videos.map((video) => <figure key={video.stage}><figcaption>{scanSectors.find((sector) => sector.id === video.stage)?.label || video.stage}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${draft.id}/videos/${video.stage}`} /></figure>)}</div>
+                      <div className="video-evidence-grid seller-video-evidence">{draft.videos.map((video) => <figure key={video.stage}><figcaption>{captureStages.find((stage) => stage.id === video.stage)?.label || video.stage}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${draft.id}/videos/${video.stage}`} /></figure>)}</div>
                       <button type="button" className="button button-outline full-button" disabled={busy} onClick={() => { setDraft(null); clearFrames(); setTitle(""); setPrice(""); setCategory("디지털 · 카메라"); setDescription(""); setMessage(""); setFormError(""); }}>다른 상품 새로 스캔하기</button>
                     </>}
                   </div>
                 )}
               </div>
               <aside className="scan-sidebar">
-                <div className="sidebar-card"><div className="eyebrow">SCAN QUALITY</div><h3>안내에 따른<br />두 번의 이동 경로</h3><ol className="quality-list"><li><span>01</span><div><strong>판매할 상품 선택</strong><p>화면에서 상품을 터치하면 기기 안에서 상품 영역을 추적합니다.</p></div></li><li><span>02</span><div><strong>표식과 이동 방향 따르기</strong><p>현재 프레임과 방향 센서로 조준 위치와 다음 방향을 안내합니다.</p></div></li><li><span>03</span><div><strong>밝기 자동 확인</strong><p>어두운 환경에서는 지원되는 카메라 플래시를 자동으로 켭니다.</p></div></li></ol></div>
-                <div className="sidebar-note"><span>R.</span><p>촬영 중 두 개를 넘는 경로를 요구하지 않으며, 필수 원본 영상은 플랫폼에서 직접 촬영한 경우에만 제출됩니다.</p></div>
+                <div className="sidebar-card"><div className="eyebrow">SCAN QUALITY</div><h3>전체 회전 2회<br />4K 근접 촬영 1회</h3><ol className="quality-list"><li><span>01</span><div><strong>판매할 상품 선택</strong><p>화면에서 상품을 터치하면 기기 안에서 상품 영역을 추적합니다.</p></div></li><li><span>02</span><div><strong>두 전체 경로 안내 따르기</strong><p>방향 센서가 다음 방향과 상품 조준 위치를 안내합니다.</p></div></li><li><span>03</span><div><strong>상품을 가까이서 돌려 촬영</strong><p>상품이 화면 대부분을 차지하도록 4K로 천천히 모든 면을 기록합니다.</p></div></li><li><span>04</span><div><strong>원본 품질 검사</strong><p>서버가 4K 해상도와 초점을 검사하고 선명한 근접 프레임을 저장합니다.</p></div></li></ol></div>
+                <div className="sidebar-note"><span>R.</span><p>0.5mm는 촬영 설계 목표이며 발견 보증이 아닙니다. 결함이 흐리거나 가려져 입력 영상에 담기지 않으면 모델도 복원할 수 없습니다.</p></div>
               </aside>
             </div>
           </section>
@@ -1280,7 +1368,8 @@ function App() {
               {activeConversation?.listingId === selected.id && <section className="chat-panel"><h3>{activeConversation.listingTitle} 문의 · {activeConversation.otherUsername}</h3><div className="chat-messages">{chatMessages.map((chat) => <p key={chat.id} className={chat.senderId === user?.id ? "chat-message mine" : "chat-message"}><strong>{chat.senderUsername}</strong>{chat.body}</p>)}</div><form className="chat-compose" onSubmit={sendMessage}><input aria-label="메시지 내용" maxLength={2000} value={messageInput} onChange={(event) => setMessageInput(event.target.value)} placeholder="판매자에게 메시지 보내기" /><button className="button button-dark" disabled={!messageInput.trim()}>전송</button></form></section>}
               <div className="originals-heading"><strong>촬영 원본 프레임</strong><span>상품과 3D 결과를 여러 방향에서 직접 확인하세요.</span></div>
               <div className="modal-originals">{selected.scan.images.map((image, index) => <img key={image} src={`/media/scans/${selected.scan.id}/images/${encodeURIComponent(image)}`} alt={`${selected.title} 원본 사진 ${index + 1}`} loading="lazy" />)}</div>
-              {selected.scan.videos?.length > 0 && <div className="video-evidence"><h3>두 이동 경로의 원본 영상</h3><div className="video-evidence-grid">{selected.scan.videos.map((video) => <figure key={video.stage}><figcaption>{scanSectors.find((sector) => sector.id === video.stage)?.label || video.stage}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${selected.scan.id}/videos/${video.stage}`} /></figure>)}</div></div>}
+              {selected.scan.details?.length > 0 && <div className="detail-evidence"><h3>4K 근접 표면 사진 · {selected.scan.details.length}장</h3><p>사진을 열어 원본 크기로 확대해 확인하세요. 자동 결함 판정 결과는 아닙니다.</p><div>{selected.scan.details.map((frame, index) => <a key={frame.name} href={`/media/scans/${selected.scan.id}/details/${encodeURIComponent(frame.name)}`} target="_blank" rel="noreferrer"><img src={`/media/scans/${selected.scan.id}/details/${encodeURIComponent(frame.name)}`} alt={`${selected.title} 근접 표면 사진 ${index + 1}`} loading="lazy" /><span>{frame.width}×{frame.height}</span></a>)}</div></div>}
+              {selected.scan.videos?.length > 0 && <div className="video-evidence"><h3>전체 이동 경로와 근접 촬영 원본 영상</h3><div className="video-evidence-grid">{selected.scan.videos.map((video) => <figure key={video.stage}><figcaption>{captureStages.find((stage) => stage.id === video.stage)?.label || video.stage}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${selected.scan.id}/videos/${video.stage}`} /></figure>)}</div></div>}
             </div>
           </article>
         </div>

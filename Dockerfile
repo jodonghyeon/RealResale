@@ -17,6 +17,7 @@ COPY --from=app-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=app-build /app/node_modules ./node_modules
 COPY --from=app-build /app/package.json ./package.json
 COPY --from=app-build /app/server.js ./server.js
+COPY --from=app-build /app/src/scan-guidance.js ./src/scan-guidance.js
 COPY --from=app-build /app/dist ./dist
 
 ENV NODE_ENV=production \

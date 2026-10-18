@@ -53,6 +53,67 @@ export function getFramingGuidance(bounds) {
   return "좋아요. 초점을 유지한 채 이 면을 천천히 촬영하세요.";
 }
 
+export function getDetailCaptureGuidance(bounds) {
+  if (!bounds) return "상품을 화면 중앙에서 다시 선택하세요.";
+  if (
+    bounds.left < 0.025 ||
+    bounds.top < 0.025 ||
+    bounds.right > 0.975 ||
+    bounds.bottom > 0.975
+  ) {
+    return "상품이 잘리지 않도록 카메라를 조금 멀리하세요.";
+  }
+  const extent = Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top);
+  if (extent < 0.55) return "결함이 기록되도록 상품에 더 가까이 다가가세요.";
+  if (extent > 0.88) return "상품 가장자리가 잘리지 않도록 조금 멀리하세요.";
+  const centerX = (bounds.left + bounds.right) / 2;
+  const centerY = (bounds.top + bounds.bottom) / 2;
+  if (centerX < 0.3 || centerX > 0.7 || centerY < 0.25 || centerY > 0.75) {
+    return "상품을 화면 중앙에 맞춰 주세요.";
+  }
+  return "좋아요. 초점을 유지하고 물건을 천천히 돌려 모든 면을 가까이 촬영하세요.";
+}
+
+export function hasDetailCaptureFraming(bounds) {
+  if (!bounds) return false;
+  const extent = Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top);
+  return (
+    bounds.left >= 0.025 &&
+    bounds.top >= 0.025 &&
+    bounds.right <= 0.975 &&
+    bounds.bottom <= 0.975 &&
+    extent >= 0.55 &&
+    extent <= 0.88
+  );
+}
+
+export function supportsDetailCaptureResolution(width, height) {
+  return Number.isFinite(width) && Number.isFinite(height) && Math.max(width, height) >= 3840;
+}
+
+export function measureLaplacianVariance(values, width, height) {
+  if (!values || width < 3 || height < 3 || values.length !== width * height) return 0;
+  let sum = 0;
+  let sumSquares = 0;
+  let samples = 0;
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const pixel = y * width + x;
+      const laplacian =
+        values[pixel - width] +
+        values[pixel - 1] +
+        values[pixel + 1] +
+        values[pixel + width] -
+        4 * values[pixel];
+      sum += laplacian;
+      sumSquares += laplacian * laplacian;
+      samples += 1;
+    }
+  }
+  const mean = sum / samples;
+  return sumSquares / samples - mean * mean;
+}
+
 export function measureFrameBrightness(imageData) {
   if (!imageData || imageData.length < 4) return null;
   const pixels = imageData.length / 4;

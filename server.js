@@ -10,6 +10,7 @@ import multer from "multer";
 import sharp from "sharp";
 import ffmpegPath from "ffmpeg-static";
 import { promisify } from "node:util";
+import { measureLaplacianVariance } from "./src/scan-guidance.js";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR || path.join(root, "data");
@@ -22,11 +23,18 @@ const httpsKeyPath = process.env.REALRESALE_HTTPS_KEY;
 const httpsCertPath = process.env.REALRESALE_HTTPS_CERT;
 const colmapPath = process.env.COLMAP_PATH || "colmap";
 const videoSectors = ["route-a", "route-b"];
+const detailVideoStage = "detail";
+const requiredVideoStages = [...videoSectors, detailVideoStage];
 const maxScansInFlight = 1;
 const maxQueuedScans = 1;
 const minImageCount = 24;
 const minFramesPerSector = minImageCount / videoSectors.length;
 const maxImageCount = 80;
+const minDetailFrames = 20;
+const maxDetailFrames = 40;
+const minDetailResolution = 3840;
+const minDetailVideoSeconds = 20;
+const maxDetailVideoSeconds = 30;
 const supportedImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/avif"]);
 const idPattern = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
 const maxScanBytes = 512 * 1024 * 1024;
@@ -65,6 +73,7 @@ db.exec(`
     progress_percent INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     videos_json TEXT NOT NULL DEFAULT '[]',
+    details_json TEXT NOT NULL DEFAULT '[]',
     title TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL DEFAULT '기타',
@@ -102,6 +111,7 @@ const scanColumns = db.prepare("PRAGMA table_info(scans)").all();
 const scanMigrations = [
   ["progress_percent", "INTEGER NOT NULL DEFAULT 0"],
   ["videos_json", "TEXT NOT NULL DEFAULT '[]'"],
+  ["details_json", "TEXT NOT NULL DEFAULT '[]'"],
   ["title", "TEXT NOT NULL DEFAULT ''"],
   ["description", "TEXT NOT NULL DEFAULT ''"],
   ["category", "TEXT NOT NULL DEFAULT '기타'"],
@@ -279,7 +289,7 @@ const videoUpload = multer({
     destination: (_req, _file, callback) => callback(null, incomingDir),
     filename: (_req, _file, callback) => callback(null, `${crypto.randomUUID()}.upload`),
   }),
-  limits: { files: videoSectors.length, fileSize: maxScanBytes },
+  limits: { files: requiredVideoStages.length, fileSize: maxScanBytes },
   fileFilter: (_req, file, callback) => {
     const supportedType = ["video/mp4", "video/quicktime", "video/webm", "video/x-m4v"].includes(file.mimetype);
     const supportedExtension = /\.(mov|mp4|m4v|webm)$/i.test(file.originalname);
@@ -336,7 +346,7 @@ async function copyUploadedFile(source, destination, expectedSize) {
 
 const getScan = db.prepare("SELECT * FROM scans WHERE id = ?");
 const listingList = db.prepare(`
-  SELECT l.*, s.id AS scan_id, s.image_count, s.images_json, s.videos_json,
+  SELECT l.*, s.id AS scan_id, s.image_count, s.images_json, s.videos_json, s.details_json,
          u.username AS seller_username
   FROM listings AS l
   INNER JOIN scans AS s ON s.id = l.scan_id
@@ -347,6 +357,7 @@ const listingList = db.prepare(`
 
 function publicScan(row) {
   const videos = JSON.parse(row.videos_json || "[]");
+  const details = JSON.parse(row.details_json || "[]");
   return {
     id: row.id,
     status: row.status,
@@ -357,6 +368,8 @@ function publicScan(row) {
     progressPercent: row.progress_percent,
     videos,
     videoCount: videos.length,
+    details,
+    detailCount: details.length,
     title: row.title,
     description: row.description,
     category: row.category,
@@ -543,27 +556,34 @@ async function extractVideoFrames(scanId, directory, videos) {
   const imagesDirectory = path.join(directory, "images");
   await fs.mkdir(extractedDirectory, { recursive: true });
   await fs.mkdir(imagesDirectory, { recursive: true });
-  await setProgress(scanId, "두 이동 경로의 원본 영상을 분석", 2);
+  await setProgress(scanId, "두 전체 경로와 근접 세부 영상 분석", 2);
 
-  const durations = [];
+  const durations = new Map();
   for (const video of videos) {
     const duration = await getVideoDuration(path.join(videoDirectory, video.name));
-    if (duration < 3 || duration > maxVideoSeconds) {
-      throw new Error(`${video.stage} 영상은 3~${maxVideoSeconds}초로 촬영해 주세요.`);
+    const minimumDuration = video.stage === detailVideoStage ? minDetailVideoSeconds : 3;
+    const maximumDuration = video.stage === detailVideoStage ? maxDetailVideoSeconds : maxVideoSeconds;
+    if (duration < minimumDuration || duration > maximumDuration + (video.stage === detailVideoStage ? 1 : 0)) {
+      throw new Error(
+        video.stage === detailVideoStage
+          ? `근접 세부 영상은 ${minDetailVideoSeconds}~${maxDetailVideoSeconds}초로 촬영해 주세요.`
+          : `${video.stage} 영상은 3~${maxVideoSeconds}초로 촬영해 주세요.`,
+      );
     }
-    durations.push(duration);
+    durations.set(video.stage, duration);
   }
-  const totalDuration = durations.reduce((total, duration) => total + duration, 0);
-  if (totalDuration > maxTotalVideoSeconds) {
-    throw new Error("전체 촬영 시간이 제한을 넘었습니다. 두 경로를 다시 확인하세요.");
+  const routeDuration = videoSectors.reduce((total, stage) => total + (durations.get(stage) || 0), 0);
+  if (routeDuration > maxTotalVideoSeconds) {
+    throw new Error("두 이동 경로의 전체 촬영 시간이 제한을 넘었습니다. 경로 영상을 다시 확인하세요.");
   }
 
   const imageNames = [];
-  for (let index = 0; index < videos.length; index += 1) {
-    const video = videos[index];
+  const routeVideos = videos.filter((video) => videoSectors.includes(video.stage));
+  for (let index = 0; index < routeVideos.length; index += 1) {
+    const video = routeVideos[index];
     const sectorImageStart = imageNames.length;
-    const frameLimit = Math.floor(maxImageCount / videos.length);
-    const fps = Math.min(1.5, frameLimit / durations[index]);
+    const frameLimit = Math.floor(maxImageCount / routeVideos.length);
+    const fps = Math.min(1.5, frameLimit / durations.get(video.stage));
     const stageDirectory = path.join(extractedDirectory, video.stage);
     await fs.mkdir(stageDirectory, { recursive: true });
     await runFfmpeg(
@@ -606,7 +626,7 @@ async function extractVideoFrames(scanId, directory, videos) {
     await setProgress(
       scanId,
       `${video.stage} 이동 경로의 프레임을 검사`,
-      Math.min(20, 2 + Math.floor(((index + 1) / videos.length) * 18)),
+      Math.min(20, 2 + Math.floor(((index + 1) / routeVideos.length) * 18)),
     );
   }
 
@@ -620,6 +640,81 @@ async function extractVideoFrames(scanId, directory, videos) {
     JSON.stringify(imageNames),
     scanId,
   );
+
+  const detailVideo = videos.find((video) => video.stage === detailVideoStage);
+  if (!detailVideo) {
+    throw new Error("상품의 미세한 상태를 확인할 근접 세부 영상이 필요해요.");
+  }
+  const detailDirectory = path.join(directory, "details");
+  const extractedDetailsDirectory = path.join(directory, "detail-extracted");
+  await fs.mkdir(detailDirectory, { recursive: true });
+  await fs.mkdir(extractedDetailsDirectory, { recursive: true });
+  await setProgress(scanId, "4K 근접 세부 프레임의 해상도와 초점을 검사", 23);
+  await runFfmpeg(
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      path.join(videoDirectory, detailVideo.name),
+      "-vf",
+      "fps=1.5",
+      "-frames:v",
+      String(maxDetailFrames),
+      "-q:v",
+      "1",
+      path.join(extractedDetailsDirectory, "%03d.jpg"),
+      "-y",
+    ],
+    "근접 세부 영상에서 고해상도 프레임 추출",
+  );
+  const detailFiles = (await fs.readdir(extractedDetailsDirectory))
+    .filter((name) => /^\d{3}\.jpg$/.test(name))
+    .sort((left, right) => Number(path.parse(left).name) - Number(path.parse(right).name));
+  const detailCandidates = [];
+  for (const filename of detailFiles) {
+    const sourcePath = path.join(extractedDetailsDirectory, filename);
+    const metadata = await sharp(sourcePath).metadata();
+    if (
+      !metadata.width ||
+      !metadata.height ||
+      Math.max(metadata.width, metadata.height) < minDetailResolution
+    ) {
+      continue;
+    }
+    const { data, info } = await sharp(sourcePath)
+      .resize({ width: 640, height: 640, fit: "inside", withoutEnlargement: true })
+      .greyscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const sharpness = measureLaplacianVariance(data, info.width, info.height);
+    detailCandidates.push({ filename, sourcePath, width: metadata.width, height: metadata.height, sharpness });
+  }
+  if (detailCandidates.length < minDetailFrames) {
+    throw new Error(
+      `근접 영상에서 ${minDetailResolution}px 이상 원본 프레임을 ${minDetailFrames}장 확보하지 못했어요. 카메라의 4K 촬영 설정과 초점을 확인해 다시 촬영하세요.`,
+    );
+  }
+  const sortedSharpness = detailCandidates.map((frame) => frame.sharpness).sort((left, right) => left - right);
+  const sharpnessThreshold = Math.max(12, sortedSharpness[Math.floor((sortedSharpness.length - 1) * 0.2)] * 0.35);
+  const selectedDetails = detailCandidates.filter((frame) => frame.sharpness >= sharpnessThreshold);
+  if (selectedDetails.length < minDetailFrames) {
+    throw new Error(
+      `초점이 선명한 4K 근접 프레임이 ${minDetailFrames}장 미만이에요. 조명을 밝히고 카메라를 천천히 움직여 다시 촬영하세요.`,
+    );
+  }
+  const detailRecords = [];
+  for (const [index, frame] of selectedDetails.entries()) {
+    const name = `${String(index + 1).padStart(3, "0")}.jpg`;
+    await fs.copyFile(frame.sourcePath, path.join(detailDirectory, name));
+    detailRecords.push({ name, width: frame.width, height: frame.height });
+  }
+  await fs.rm(extractedDetailsDirectory, { recursive: true, force: true });
+  db.prepare("UPDATE scans SET details_json = ? WHERE id = ?").run(
+    JSON.stringify(detailRecords),
+    scanId,
+  );
+  await setProgress(scanId, "고해상도 근접 결함 증거를 저장", 25);
 }
 
 async function reconstructScan(scanId) {
@@ -644,7 +739,7 @@ async function reconstructScan(scanId) {
   await fs.mkdir(sparseDir, { recursive: true });
   await fs.mkdir(denseDir, { recursive: true });
 
-  await setProgress(scanId, "추출한 고해상도 프레임 정규화", 20);
+  await setProgress(scanId, "추출한 고해상도 프레임 정규화", 25);
   for (let index = 0; index < imageRows.images.length; index += 1) {
     const filename = imageRows.images[index];
     await sharp(path.join(directory, filename), { limitInputPixels: 70_000_000 })
@@ -654,10 +749,10 @@ async function reconstructScan(scanId) {
     await setProgress(
       scanId,
       "추출한 고해상도 프레임 정규화",
-      20 + Math.floor(((index + 1) / imageRows.images.length) * 8),
+      25 + Math.floor(((index + 1) / imageRows.images.length) * 8),
     );
   }
-  await setProgress(scanId, "3D 특징점과 카메라 정보 분석", 28);
+  await setProgress(scanId, "3D 특징점과 카메라 정보 분석", 33);
 
   const base = { cwd: workDir, scanId };
   await runColmap(
@@ -681,7 +776,7 @@ async function reconstructScan(scanId) {
     },
     "사진의 특징점과 카메라 위치 분석",
     45 * 60 * 1000,
-    { start: 28, end: 38 },
+    { start: 33, end: 43 },
   );
   await runColmap(
     {
@@ -690,13 +785,13 @@ async function reconstructScan(scanId) {
     },
     "겹쳐 찍은 사진들의 연결 확인",
     45 * 60 * 1000,
-    { start: 38, end: 50 },
+    { start: 43, end: 53 },
   );
   await runColmap(
     { ...base, command: ["mapper", "--database_path", databasePath, "--image_path", imagesDir, "--output_path", sparseDir] },
     "촬영된 사진으로 3D 카메라 위치 계산",
     45 * 60 * 1000,
-    { start: 50, end: 60 },
+    { start: 53, end: 63 },
   );
 
   const sparseModels = (await fs.readdir(sparseDir, { withFileTypes: true }))
@@ -728,8 +823,8 @@ async function reconstructScan(scanId) {
       "각 3D 후보에 연결된 사진 수 확인",
       45 * 60 * 1000,
       {
-        start: 60 + Math.floor((candidateIndex / sparseModels.length) * 5),
-        end: 60 + Math.floor(((candidateIndex + 1) / sparseModels.length) * 5),
+        start: 63 + Math.floor((candidateIndex / sparseModels.length) * 5),
+        end: 63 + Math.floor(((candidateIndex + 1) / sparseModels.length) * 5),
       },
     );
     const registeredImagesText = await fs.readFile(path.join(candidateTextDir, "images.txt"), "utf8");
@@ -760,15 +855,15 @@ async function reconstructScan(scanId) {
     { ...base, command: ["image_undistorter", "--image_path", imagesDir, "--input_path", sparseModel, "--output_path", denseDir, "--output_type", "COLMAP", "--max_image_size", "4096"] },
     "고해상도 사진을 3D 공간에 정렬",
     45 * 60 * 1000,
-    { start: 65, end: 72 },
+    { start: 68, end: 74 },
   );
   await runColmap(
     { ...base, command: ["patch_match_stereo", "--workspace_path", denseDir, "--workspace_format", "COLMAP", "--PatchMatchStereo.geom_consistency", "true"] },
     "여러 각도에서 표면 깊이와 색상 복원",
     90 * 60 * 1000,
     {
-      start: 72,
-      end: 88,
+      start: 74,
+      end: 90,
       directory: path.join(denseDir, "stereo", "depth_maps"),
       expectedFiles: registeredImageCount,
     },
@@ -778,7 +873,7 @@ async function reconstructScan(scanId) {
     { ...base, command: ["stereo_fusion", "--workspace_path", denseDir, "--workspace_format", "COLMAP", "--input_type", "geometric", "--output_path", fusedPath] },
     "색상이 포함된 3D 점군 생성",
     45 * 60 * 1000,
-    { start: 88, end: 96 },
+    { start: 90, end: 96 },
   );
   await setProgress(scanId, "고밀도 컬러 3D 표면을 확인", 96);
   const modelPath = path.join(directory, "model.ply");
@@ -895,8 +990,11 @@ app.get("/api/health", (_req, res) => {
     minImages: minImageCount,
     maxImages: maxImageCount,
     requiredCaptureSectors: videoSectors,
+    requiredCaptureStages: requiredVideoStages,
+    minDetailFrames,
+    minDetailResolution,
     maxVideoSeconds,
-    maxTotalVideoSeconds,
+    maxTotalVideoSeconds: maxTotalVideoSeconds + maxDetailVideoSeconds,
   });
 });
 
@@ -915,6 +1013,7 @@ app.get("/api/listings", (_req, res) => {
       imageCount: row.image_count,
       images: JSON.parse(row.images_json),
       videos: JSON.parse(row.videos_json || "[]"),
+      details: JSON.parse(row.details_json || "[]"),
     },
   }));
   res.json({ listings });
@@ -1039,7 +1138,7 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
     res.status(413).json({ error: "전체 촬영 영상 용량은 512MB 이하여야 해요." });
     return;
   }
-  videoUpload.array("videos", videoSectors.length)(req, res, async (uploadError) => {
+  videoUpload.array("videos", requiredVideoStages.length)(req, res, async (uploadError) => {
     const files = req.files || [];
     if (uploadError) {
       await cleanupUploads(files);
@@ -1051,12 +1150,12 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
     const totalBytes = files.reduce((total, file) => total + file.size, 0);
     const parsedPrice = Number(price);
     if (
-      files.length !== videoSectors.length ||
-      new Set(stages).size !== videoSectors.length ||
-      videoSectors.some((sector) => !stages.includes(sector))
+      files.length !== requiredVideoStages.length ||
+      new Set(stages).size !== requiredVideoStages.length ||
+      requiredVideoStages.some((stage) => !stages.includes(stage))
     ) {
       await cleanupUploads(files);
-      res.status(400).json({ error: "첫 번째와 두 번째 이동 경로 영상이 각각 필요해요." });
+      res.status(400).json({ error: "두 이동 경로 영상과 고해상도 근접 세부 영상이 각각 필요해요." });
       return;
     }
     if (totalBytes > maxScanBytes) {
@@ -1096,9 +1195,9 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
     const scanId = crypto.randomUUID();
     const directory = path.join(scanDir, scanId);
     const videoDirectory = path.join(directory, "videos");
-    const videos = files.map((file, index) => ({
-      stage: stages[index],
-      name: `${stages[index]}${path.extname(file.originalname).toLowerCase()}`,
+    const videos = files.map((file) => ({
+      stage: path.basename(file.originalname, path.extname(file.originalname)).toLowerCase(),
+      name: `${path.basename(file.originalname, path.extname(file.originalname)).toLowerCase()}${path.extname(file.originalname).toLowerCase()}`,
     }));
     try {
       await fs.mkdir(videoDirectory, { recursive: true });
@@ -1214,6 +1313,17 @@ app.post("/api/listings", (req, res) => {
   const uploadedStages = new Set(JSON.parse(scan.videos_json || "[]").map((video) => video.stage));
   if (videoSectors.some((sector) => !uploadedStages.has(sector))) {
     res.status(409).json({ error: "두 이동 경로를 모두 담은 스캔만 매물로 등록할 수 있어요." });
+    return;
+  }
+  if (!uploadedStages.has(detailVideoStage)) {
+    res.status(409).json({ error: "4K 근접 결함 촬영 원본이 있는 스캔만 매물로 등록할 수 있어요." });
+    return;
+  }
+  const details = JSON.parse(scan.details_json || "[]");
+  if (details.length < minDetailFrames) {
+    res.status(409).json({
+      error: `4K 해상도와 선명도를 확인한 근접 프레임 ${minDetailFrames}장 이상이 있는 스캔만 등록할 수 있어요.`,
+    });
     return;
   }
 
@@ -1393,6 +1503,22 @@ app.get("/media/scans/:id/videos/:stage", async (req, res, next) => {
   }
 });
 
+app.get("/media/scans/:id/details/:filename", async (req, res, next) => {
+  try {
+    const row = idPattern.test(req.params.id) ? getScan.get(req.params.id) : null;
+    const filename = req.params.filename;
+    const details = row && row.status === "ready" ? JSON.parse(row.details_json || "[]") : [];
+    if (!details.some((frame) => frame.name === filename)) {
+      res.status(404).json({ error: "근접 세부 사진을 찾을 수 없습니다." });
+      return;
+    }
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    await res.sendFile(path.join(scanDir, req.params.id, "details", filename));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use("/api", (_req, res) => {
   res.status(404).json({ error: "API 경로를 찾을 수 없습니다." });
 });
@@ -1418,7 +1544,7 @@ app.use((error, _req, res, _next) => {
     }
     if (error.code === "LIMIT_FILE_COUNT") {
       if (error.field === "videos") {
-        res.status(413).json({ error: `촬영 영상은 최대 ${videoSectors.length}개까지 올릴 수 있어요.` });
+        res.status(413).json({ error: `촬영 영상은 최대 ${requiredVideoStages.length}개까지 올릴 수 있어요.` });
         return;
       }
       res.status(413).json({ error: `사진은 최대 ${maxImageCount}장까지 한 번에 올릴 수 있어요.` });

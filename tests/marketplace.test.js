@@ -11,11 +11,15 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   getAdaptiveScanGuidance,
+  getDetailCaptureGuidance,
   getFramingGuidance,
+  hasDetailCaptureFraming,
+  measureLaplacianVariance,
   measureForegroundMask,
   measureFrameBrightness,
   normalizeDegrees,
   recordHeadingCoverage,
+  supportsDetailCaptureResolution,
 } from "../src/scan-guidance.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -107,6 +111,9 @@ before(async () => {
   assert.equal(health.ok, true);
   assert.equal(health.videoProcessingAvailable, true);
   assert.deepEqual(health.requiredCaptureSectors, ["route-a", "route-b"]);
+  assert.deepEqual(health.requiredCaptureStages, ["route-a", "route-b", "detail"]);
+  assert.equal(health.minDetailFrames, 20);
+  assert.equal(health.minDetailResolution, 3840);
   assert.equal(typeof health.reconstructionAvailable, "boolean");
   seller = await registerUser("seller_user");
   buyer = await registerUser("buyer_user");
@@ -166,6 +173,7 @@ test("migrates scan progress and exposes its percentage through the API", async 
     const columns = database.prepare("PRAGMA table_info(scans)").all();
     assert.ok(columns.some((column) => column.name === "progress_percent"));
     assert.ok(columns.some((column) => column.name === "videos_json"));
+    assert.ok(columns.some((column) => column.name === "details_json"));
     assert.ok(columns.some((column) => column.name === "description"));
 
     database.prepare(
@@ -194,8 +202,25 @@ test("requires both guided video routes", async () => {
     body: form,
   });
   assert.equal(response.status, 400);
-  assert.match((await response.json()).error, /두 번째 이동 경로/);
+  assert.match((await response.json()).error, /두 이동 경로 영상과 고해상도 근접 세부 영상/);
   assert.deepEqual((await (await fetch(`${baseUrl}/api/scans`, { headers: { cookie: seller.cookie } })).json()).scans, []);
+  assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
+
+  const missingCloseup = new FormData();
+  for (const stage of ["route-a", "route-b"]) {
+    missingCloseup.append("videos", new Blob(["not an actual video"], { type: "video/mp4" }), `${stage}.mp4`);
+  }
+  missingCloseup.append("title", "Test product");
+  missingCloseup.append("description", "Details");
+  missingCloseup.append("category", "Other");
+  missingCloseup.append("price", "100");
+  const missingCloseupResponse = await fetch(`${baseUrl}/api/scans/videos`, {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1:5173", cookie: seller.cookie },
+    body: missingCloseup,
+  });
+  assert.equal(missingCloseupResponse.status, 400);
+  assert.match((await missingCloseupResponse.json()).error, /고해상도 근접 세부 영상/);
   assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
 });
 
@@ -236,6 +261,24 @@ test("guides the camera across two direction sectors and measures illumination",
   assert.equal(guidance.targetDirection, "왼쪽");
   assert.equal(measureFrameBrightness(new Uint8ClampedArray([0, 0, 0, 255])), 0);
   assert.ok(measureFrameBrightness(new Uint8ClampedArray([255, 255, 255, 255])) > 254);
+});
+
+test("requires close, uncropped framing and 4K resolution for defect evidence", () => {
+  const closeBounds = { left: 0.15, top: 0.12, right: 0.85, bottom: 0.88 };
+  assert.equal(hasDetailCaptureFraming(closeBounds), true);
+  assert.equal(hasDetailCaptureFraming({ ...closeBounds, right: 0.98 }), false);
+  assert.match(getDetailCaptureGuidance({ ...closeBounds, right: 0.98 }), /멀리/);
+  assert.match(getDetailCaptureGuidance({ left: 0.3, top: 0.3, right: 0.7, bottom: 0.7 }), /가까이/);
+  assert.match(getDetailCaptureGuidance(closeBounds), /천천히 돌려 모든 면을 가까이 촬영/);
+  assert.equal(supportsDetailCaptureResolution(3840, 2160), true);
+  assert.equal(supportsDetailCaptureResolution(1920, 1080), false);
+  const smooth = new Uint8Array(16 * 16).fill(128);
+  const textured = Uint8Array.from({ length: 16 * 16 }, (_, index) => (
+    (index % 16 + Math.floor(index / 16)) % 2 ? 255 : 0
+  ));
+  assert.equal(measureLaplacianVariance(smooth, 16, 16), 0);
+  assert.ok(measureLaplacianVariance(textured, 16, 16) > 0);
+  assert.equal(measureLaplacianVariance(null, 0, 0), 0);
 });
 
 test("rejects direct listing submissions and untrusted browser origins", async () => {
@@ -302,19 +345,26 @@ test("validates uploaded frames before queuing reconstruction", async () => {
   assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
 });
 
-test("requires both route videos for listings and exposes them to buyers", async () => {
+test("requires both route videos and 20 high-resolution detail frames for listings", async () => {
   const legacyScanId = crypto.randomUUID();
+  const incompleteScanId = crypto.randomUUID();
   const videoScanId = crypto.randomUUID();
-  const stages = ["route-a", "route-b"];
+  const stages = ["route-a", "route-b", "detail"];
   const videos = stages.map((stage) => ({ stage, name: `${stage}.mp4` }));
+  const detailFrames = Array.from({ length: 20 }, (_, index) => ({
+    name: `${String(index + 1).padStart(3, "0")}.jpg`,
+    width: 3840,
+    height: 2160,
+  }));
   const database = new DatabaseSync(databasePath);
   const videoDirectory = path.join(tempDir, "data", "scans", videoScanId, "videos");
+  const detailDirectory = path.join(tempDir, "data", "scans", videoScanId, "details");
   try {
     const insertScan = database.prepare(`
-      INSERT INTO scans (id, status, image_count, images_json, videos_json, title, description, category, price, owner_user_id)
-      VALUES (?, 'ready', 24, '[]', ?, ?, ?, ?, ?, ?)
+      INSERT INTO scans (id, status, image_count, images_json, videos_json, details_json, title, description, category, price, owner_user_id)
+      VALUES (?, 'ready', 24, '[]', ?, ?, ?, ?, ?, ?, ?)
     `);
-    insertScan.run(legacyScanId, "[]", "Legacy scan", "", "Other", 100, seller.id);
+    insertScan.run(legacyScanId, "[]", "[]", "Legacy scan", "", "Other", 100, seller.id);
     const rejected = await requestListing({
       title: "Legacy scan",
       description: "",
@@ -325,10 +375,33 @@ test("requires both route videos for listings and exposes them to buyers", async
     assert.equal(rejected.status, 409);
     assert.match((await rejected.json()).error, /두 이동 경로/);
 
-    insertScan.run(videoScanId, JSON.stringify(videos), "Video scan", "", "Other", 100, seller.id);
+    insertScan.run(
+      incompleteScanId,
+      JSON.stringify(videos),
+      "[]",
+      "Missing details",
+      "",
+      "Other",
+      100,
+      seller.id,
+    );
+    const missingDetails = await requestListing({
+      title: "Missing details",
+      description: "",
+      category: "Other",
+      price: 100,
+      scanId: incompleteScanId,
+    });
+    assert.equal(missingDetails.status, 409);
+    assert.match((await missingDetails.json()).error, /근접 프레임 20장/);
+
+    insertScan.run(videoScanId, JSON.stringify(videos), JSON.stringify(detailFrames), "Video scan", "", "Other", 100, seller.id);
     await fs.promises.mkdir(videoDirectory, { recursive: true });
+    await fs.promises.mkdir(detailDirectory, { recursive: true });
     await fs.promises.writeFile(path.join(videoDirectory, "route-a.mp4"), Buffer.from("test video"));
     await fs.promises.writeFile(path.join(videoDirectory, "route-b.mp4"), Buffer.from("test video"));
+    await fs.promises.writeFile(path.join(videoDirectory, "detail.mp4"), Buffer.from("test video"));
+    await fs.promises.writeFile(path.join(detailDirectory, detailFrames[0].name), Buffer.from("test detail image"));
     const created = await requestListing({
       title: "Video scan",
       description: "",
@@ -342,13 +415,17 @@ test("requires both route videos for listings and exposes them to buyers", async
     const { listing: createdListing } = await created.json();
     const listing = listings.listings.find((item) => item.id === createdListing.id);
     assert.deepEqual(listing.scan.videos.map((video) => video.stage), stages);
+    assert.equal(listing.scan.details.length, 20);
     const media = await fetch(`${baseUrl}/media/scans/${videoScanId}/videos/route-a`);
     assert.equal(media.status, 200);
     assert.equal(await media.text(), "test video");
+    const detailMedia = await fetch(`${baseUrl}/media/scans/${videoScanId}/details/${detailFrames[0].name}`);
+    assert.equal(detailMedia.status, 200);
+    assert.equal(await detailMedia.text(), "test detail image");
     assert.equal(listing.seller.username, seller.username);
   } finally {
-    database.prepare("DELETE FROM listings WHERE scan_id IN (?, ?)").run(legacyScanId, videoScanId);
-    database.prepare("DELETE FROM scans WHERE id IN (?, ?)").run(legacyScanId, videoScanId);
+    database.prepare("DELETE FROM listings WHERE scan_id IN (?, ?, ?)").run(legacyScanId, incompleteScanId, videoScanId);
+    database.prepare("DELETE FROM scans WHERE id IN (?, ?, ?)").run(legacyScanId, incompleteScanId, videoScanId);
     database.close();
     await fs.promises.rm(path.dirname(videoDirectory), { recursive: true, force: true });
   }
@@ -360,11 +437,20 @@ test("isolates buyer-seller conversations and protects each user's scans", async
   database.exec("PRAGMA foreign_keys = ON");
   try {
     database.prepare(`
-      INSERT INTO scans (id, status, image_count, images_json, videos_json, owner_user_id)
-      VALUES (?, 'ready', 24, '[]', ?, ?)
+      INSERT INTO scans (id, status, image_count, images_json, videos_json, details_json, owner_user_id)
+      VALUES (?, 'ready', 24, '[]', ?, ?, ?)
     `).run(
       scanId,
-      JSON.stringify([{ stage: "route-a", name: "route-a.mp4" }, { stage: "route-b", name: "route-b.mp4" }]),
+      JSON.stringify([
+        { stage: "route-a", name: "route-a.mp4" },
+        { stage: "route-b", name: "route-b.mp4" },
+        { stage: "detail", name: "detail.mp4" },
+      ]),
+      JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
+        name: `${String(index + 1).padStart(3, "0")}.jpg`,
+        width: 3840,
+        height: 2160,
+      }))),
       seller.id,
     );
 

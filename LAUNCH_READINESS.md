@@ -36,6 +36,10 @@ real-world scan quality have not been validated.
   matte, dark, shiny, transparent, reflective, repeated-pattern, small, large,
   scratched and occluded surfaces. Measure repeatable capture-to-registration
   success, scan latency, memory, file usage, and whether defects are visible.
+  The new 4K close-up gate verifies source resolution and a server-side
+  sharpness score, not scratch presence. Validate the roughly 0.5 mm capture
+  target across representative iPhone models and known defect samples before
+  describing the workflow as defect detection.
 - Review licensing, accessibility, and consumer/legal requirements for the
   actual operating region. Implement and verify marketplace purchase, messaging,
   shipping, returns and support before representing those as available.
@@ -56,8 +60,9 @@ real-world scan quality have not been validated.
   command. The PowerShell helper under `scripts/` stores the Runpod API key
   encrypted for the current Windows user and can start/stop the configured Pod.
 - A reconstructed surface can omit or smooth tiny scratches. Always inspect the
-  retained high-resolution originals and never describe an automated 3D scan as
-  proof that an item is flawless.
+  retained 4K close-up evidence and never describe an automated 3D scan as proof
+  that an item is flawless. The close-up gate checks recording resolution and
+  image sharpness; it does not identify or guarantee capture of every flaw.
 
 ## Local verification
 
