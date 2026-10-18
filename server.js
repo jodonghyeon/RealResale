@@ -31,7 +31,7 @@ const maxScansInFlight = 1;
 const maxQueuedScans = 1;
 const minImageCount = 24;
 const minFramesPerSector = minImageCount / videoSectors.length;
-const maxImageCount = 80;
+const maxImageCount = 120;
 const minDetailFrames = 20;
 const maxDetailFrames = 40;
 const minDetailResolution = 3840;
@@ -576,7 +576,7 @@ async function extractSingleVideoFrames(scanId, directory, video) {
   if (!Number.isFinite(duration) || duration <= 0 || duration > maxVideoSeconds) {
     throw new Error(`The scan video must be no longer than ${maxVideoSeconds} seconds.`);
   }
-  const candidatesLimit = Math.min(160, Math.max(1, Math.ceil(duration * 2)));
+  const candidatesLimit = Math.max(1, Math.ceil(duration * 5));
   await runFfmpeg(
     [
       "-hide_banner",
@@ -585,7 +585,7 @@ async function extractSingleVideoFrames(scanId, directory, video) {
       "-i",
       sourcePath,
       "-vf",
-      `fps=${Math.min(2, candidatesLimit / duration).toFixed(5)},scale=3840:3840:force_original_aspect_ratio=decrease`,
+      `fps=${Math.min(5, candidatesLimit / duration).toFixed(5)},scale=3840:3840:force_original_aspect_ratio=decrease`,
       "-frames:v",
       String(candidatesLimit),
       "-q:v",
@@ -599,7 +599,7 @@ async function extractSingleVideoFrames(scanId, directory, video) {
   const filenames = (await fs.readdir(candidateDirectory))
     .filter((name) => /^\d{4}\.jpg$/.test(name))
     .sort((left, right) => Number(path.parse(left).name) - Number(path.parse(right).name));
-  const targetCount = Math.min(maxImageCount, Math.max(1, Math.ceil(duration * 1.5)));
+  const targetCount = Math.min(maxImageCount, Math.max(1, Math.ceil(duration * 2.5)));
   const bestByInterval = new Map();
   for (const [index, filename] of filenames.entries()) {
     const source = path.join(candidateDirectory, filename);
@@ -943,13 +943,6 @@ async function reconstructScan(scanId) {
   if (!sparseModel) {
     throw new Error("Could not verify 3D camera positions from the images. Take sharp photos from multiple angles and try again.");
   }
-  const requiredImageCount = Math.ceil(imageRows.images.length * 0.7);
-  if (registeredImageCount < requiredImageCount) {
-    throw new Error(
-      `Only ${registeredImageCount} of ${imageRows.images.length} images were registered in 3D space. At least ${requiredImageCount} are required. Check the camera path and overlap between images.`,
-    );
-  }
-
   await runColmap(
     { ...base, command: ["image_undistorter", "--image_path", imagesDir, "--input_path", sparseModel, "--output_path", denseDir, "--output_type", "COLMAP", "--max_image_size", "4096"] },
     "Aligning high-resolution images in 3D space",
