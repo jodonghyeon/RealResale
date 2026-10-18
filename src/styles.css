@@ -142,6 +142,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .camera-viewport { position: relative; width: 100%; aspect-ratio: 4 / 3; overflow: hidden; background: #171914; touch-action: manipulation; }
 .camera-viewport > video { display: block; width: 100%; height: 100%; background: #171914; object-fit: contain; }
 .camera-selection-layer { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: crosshair; touch-action: manipulation; }
+.camera-touch-prompt { position: absolute; top: 50%; left: 50%; max-width: calc(100% - 24px); padding: 11px 15px; border: 1px solid #ffffff80; border-radius: 22px; background: #161912dc; color: white; font-size: 12px; font-weight: 600; text-align: center; transform: translate(-50%,-50%); pointer-events: none; }
 .selection-point { position: absolute; width: 24px; height: 24px; border: 2px solid #fff; border-radius: 50%; background: #b5d86b75; box-shadow: 0 0 0 2px #27311e; transform: translate(-50%,-50%); pointer-events: none; }
 .object-outline { position: absolute; border: 2px solid #b9e26e; border-radius: 8px; box-shadow: 0 0 0 1px #26371a,0 0 18px #b9e26e99; pointer-events: none; }
 .camera-guide { position: absolute; top: 10px; left: 50%; max-width: calc(100% - 20px); padding: 8px 11px; border-radius: 18px; background: #161912dc; color: white; font-size: 10px; line-height: 1.5; text-align: center; transform: translateX(-50%); pointer-events: none; }
@@ -149,6 +150,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .camera-controls { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 12px; }
 .camera-controls .button { background: white; }
 .camera-controls .button:disabled, .capture-option:disabled { cursor: wait; opacity: .55; }
+.model-download-progress { display: grid; gap: 6px; margin: 10px 0; color: #c6ccbb; font-size: 10px; }
 .button-recording { border-color: #a64b40; color: #a64b40; }
 .recording-indicator { display: flex; align-items: center; justify-content: center; gap: 7px; margin: 0 0 12px; color: #f0d6d2; font-size: 9px; }
 .recording-indicator > span { width: 7px; height: 7px; border-radius: 50%; background: #e36556; animation: pulse 1s infinite; }

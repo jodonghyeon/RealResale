@@ -178,7 +178,7 @@ test("migrates scan progress and exposes its percentage through the API", async 
 
     database.prepare(
       "INSERT INTO scans (id, status, image_count, images_json, progress, progress_percent, owner_user_id) VALUES (?, 'processing', ?, ?, ?, ?, ?)",
-    ).run("progress-test", 24, "[]", "표면 깊이 복원", 63, seller.id);
+    ).run("progress-test", 24, "[]", "Reconstructing surface depth", 63, seller.id);
     const response = await fetch(`${baseUrl}/api/scans`, { headers: { cookie: seller.cookie } });
     const { scans } = await response.json();
     assert.equal(scans[0].id, "progress-test");
@@ -202,7 +202,7 @@ test("requires both guided video routes", async () => {
     body: form,
   });
   assert.equal(response.status, 400);
-  assert.match((await response.json()).error, /두 이동 경로 영상과 고해상도 근접 세부 영상/);
+  assert.match((await response.json()).error, /Two route videos and one high-resolution close-up video/);
   assert.deepEqual((await (await fetch(`${baseUrl}/api/scans`, { headers: { cookie: seller.cookie } })).json()).scans, []);
   assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
 
@@ -220,7 +220,7 @@ test("requires both guided video routes", async () => {
     body: missingCloseup,
   });
   assert.equal(missingCloseupResponse.status, 400);
-  assert.match((await missingCloseupResponse.json()).error, /고해상도 근접 세부 영상/);
+  assert.match((await missingCloseupResponse.json()).error, /high-resolution close-up video/);
   assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
 });
 
@@ -233,9 +233,9 @@ test("measures a selected foreground and returns distance guidance", () => {
   assert.ok(bounds);
   assert.ok(bounds.left >= 0.29 && bounds.left <= 0.31);
   assert.ok(bounds.right >= 0.69 && bounds.right <= 0.71);
-  assert.match(getFramingGuidance(bounds), /좋아요/);
-  assert.match(getFramingGuidance({ left: 0.1, top: 0.1, right: 0.2, bottom: 0.2 }), /가까이/);
-  assert.match(getFramingGuidance({ left: 0.1, top: 0.1, right: 0.99, bottom: 0.9 }), /잘리지/);
+  assert.match(getFramingGuidance(bounds), /Good/);
+  assert.match(getFramingGuidance({ left: 0.1, top: 0.1, right: 0.2, bottom: 0.2 }), /Move closer/);
+  assert.match(getFramingGuidance({ left: 0.1, top: 0.1, right: 0.99, bottom: 0.9 }), /Move back/);
   assert.equal(measureForegroundMask(new Float32Array(10000).fill(1), 100, 100), null);
 });
 
@@ -258,7 +258,7 @@ test("guides the camera across two direction sectors and measures illumination",
   });
   assert.ok(guidance.aimPoint.x >= 0.49 && guidance.aimPoint.x <= 0.51);
   assert.equal(guidance.complete, false);
-  assert.equal(guidance.targetDirection, "왼쪽");
+  assert.equal(guidance.targetDirection, "left");
   assert.equal(measureFrameBrightness(new Uint8ClampedArray([0, 0, 0, 255])), 0);
   assert.ok(measureFrameBrightness(new Uint8ClampedArray([255, 255, 255, 255])) > 254);
 });
@@ -267,9 +267,9 @@ test("requires close, uncropped framing and 4K resolution for defect evidence", 
   const closeBounds = { left: 0.15, top: 0.12, right: 0.85, bottom: 0.88 };
   assert.equal(hasDetailCaptureFraming(closeBounds), true);
   assert.equal(hasDetailCaptureFraming({ ...closeBounds, right: 0.98 }), false);
-  assert.match(getDetailCaptureGuidance({ ...closeBounds, right: 0.98 }), /멀리/);
-  assert.match(getDetailCaptureGuidance({ left: 0.3, top: 0.3, right: 0.7, bottom: 0.7 }), /가까이/);
-  assert.match(getDetailCaptureGuidance(closeBounds), /천천히 돌려 모든 면을 가까이 촬영/);
+  assert.match(getDetailCaptureGuidance({ ...closeBounds, right: 0.98 }), /Move back/);
+  assert.match(getDetailCaptureGuidance({ left: 0.3, top: 0.3, right: 0.7, bottom: 0.7 }), /Move closer/);
+  assert.match(getDetailCaptureGuidance(closeBounds), /slowly rotate the item to capture every side up close/);
   assert.equal(supportsDetailCaptureResolution(3840, 2160), true);
   assert.equal(supportsDetailCaptureResolution(1920, 1080), false);
   const smooth = new Uint8Array(16 * 16).fill(128);
@@ -290,11 +290,11 @@ test("rejects direct listing submissions and untrusted browser origins", async (
     scanId: crypto.randomUUID(),
   });
   assert.equal(rejectedListing.status, 409);
-  assert.match((await rejectedListing.json()).error, /재구성을 완료한 스캔/);
+  assert.match((await rejectedListing.json()).error, /scans reconstructed by the platform/);
 
   const rejectedOrigin = await requestListing({}, "https://untrusted.example");
   assert.equal(rejectedOrigin.status, 403);
-  assert.match((await rejectedOrigin.json()).error, /요청/);
+  assert.match((await rejectedOrigin.json()).error, /configured RealResale address/);
 
   const anonymousListing = await requestListing({
     title: "No account",
@@ -322,7 +322,7 @@ test("validates uploaded frames before queuing reconstruction", async () => {
     body: form,
   });
   assert.equal(scanResponse.status, 400);
-  assert.match((await scanResponse.json()).error, /최소 24장/);
+  assert.match((await scanResponse.json()).error, /At least 24 images/);
   assert.deepEqual((await (await fetch(`${baseUrl}/api/scans`, { headers: { cookie: seller.cookie } })).json()).scans, []);
   assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
 
@@ -340,7 +340,7 @@ test("validates uploaded frames before queuing reconstruction", async () => {
     body: untrustedImages,
   });
   assert.equal(invalidImageResponse.status, 400);
-  assert.match((await invalidImageResponse.json()).error, /사진 1장을 읽을 수 없어요/);
+  assert.match((await invalidImageResponse.json()).error, /Could not read image 1/);
   assert.deepEqual((await (await fetch(`${baseUrl}/api/scans`, { headers: { cookie: seller.cookie } })).json()).scans, []);
   assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
 });
@@ -373,7 +373,7 @@ test("requires both route videos and 20 high-resolution detail frames for listin
       scanId: legacyScanId,
     });
     assert.equal(rejected.status, 409);
-    assert.match((await rejected.json()).error, /두 이동 경로/);
+    assert.match((await rejected.json()).error, /both capture routes/);
 
     insertScan.run(
       incompleteScanId,
@@ -393,7 +393,7 @@ test("requires both route videos and 20 high-resolution detail frames for listin
       scanId: incompleteScanId,
     });
     assert.equal(missingDetails.status, 409);
-    assert.match((await missingDetails.json()).error, /근접 프레임 20장/);
+    assert.match((await missingDetails.json()).error, /at least 20 close-up frames/);
 
     insertScan.run(videoScanId, JSON.stringify(videos), JSON.stringify(detailFrames), "Video scan", "", "Other", 100, seller.id);
     await fs.promises.mkdir(videoDirectory, { recursive: true });
@@ -475,11 +475,11 @@ test("isolates buyer-seller conversations and protects each user's scans", async
     const sentResponse = await fetch(`${baseUrl}/api/conversations/${conversation.id}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173", cookie: buyer.cookie },
-      body: JSON.stringify({ body: "상품이 아직 판매 중인가요?" }),
+      body: JSON.stringify({ body: "Is this item still available?" }),
     });
     const sentResult = await sentResponse.json();
     assert.equal(sentResponse.status, 201, sentResult.error);
-    assert.equal(sentResult.message.body, "상품이 아직 판매 중인가요?");
+    assert.equal(sentResult.message.body, "Is this item still available?");
 
     const sellerInbox = await fetch(`${baseUrl}/api/conversations`, {
       headers: { cookie: seller.cookie },
@@ -490,7 +490,7 @@ test("isolates buyer-seller conversations and protects each user's scans", async
     const sellerReply = await fetch(`${baseUrl}/api/conversations/${conversation.id}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173", cookie: seller.cookie },
-      body: JSON.stringify({ body: "네, 판매 중입니다." }),
+      body: JSON.stringify({ body: "Yes, it is still available." }),
     });
     assert.equal(sellerReply.status, 201);
 
@@ -526,7 +526,7 @@ test("isolates buyer-seller conversations and protects each user's scans", async
       headers: { cookie: buyer.cookie },
     });
     const { messages } = await messageHistory.json();
-    assert.deepEqual(messages.map((item) => item.body), ["상품이 아직 판매 중인가요?", "네, 판매 중입니다."]);
+    assert.deepEqual(messages.map((item) => item.body), ["Is this item still available?", "Yes, it is still available."]);
   } finally {
     database.prepare("DELETE FROM listings WHERE scan_id = ?").run(scanId);
     database.prepare("DELETE FROM scans WHERE id = ?").run(scanId);
@@ -567,5 +567,5 @@ test("rejects oversized scan requests before accepting any image data", async ()
     request.end();
   });
   assert.equal(response.status, 413);
-  assert.match(response.body.error, /512MB/);
+  assert.match(response.body.error, /512 MB/);
 });

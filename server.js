@@ -76,7 +76,7 @@ db.exec(`
     details_json TEXT NOT NULL DEFAULT '[]',
     title TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
-    category TEXT NOT NULL DEFAULT '기타',
+    category TEXT NOT NULL DEFAULT 'Other',
     price INTEGER NOT NULL DEFAULT 0,
     owner_user_id TEXT REFERENCES users(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -114,7 +114,7 @@ const scanMigrations = [
   ["details_json", "TEXT NOT NULL DEFAULT '[]'"],
   ["title", "TEXT NOT NULL DEFAULT ''"],
   ["description", "TEXT NOT NULL DEFAULT ''"],
-  ["category", "TEXT NOT NULL DEFAULT '기타'"],
+  ["category", "TEXT NOT NULL DEFAULT 'Other'"],
   ["price", "INTEGER NOT NULL DEFAULT 0"],
   ["owner_user_id", "TEXT REFERENCES users(id)"],
 ];
@@ -122,6 +122,17 @@ for (const [name, declaration] of scanMigrations) {
   if (!scanColumns.some((column) => column.name === name)) {
     db.exec(`ALTER TABLE scans ADD COLUMN ${name} ${declaration}`);
   }
+}
+const legacyCategoryLabels = [
+  ["디지털 · 카메라", "Electronics & cameras"],
+  ["패션 · 의류", "Fashion & clothing"],
+  ["가구 · 인테리어", "Furniture & home"],
+  ["생활 · 취미", "Home & hobbies"],
+  ["기타", "Other"],
+];
+for (const [legacyLabel, englishLabel] of legacyCategoryLabels) {
+  db.prepare("UPDATE scans SET category = ? WHERE category = ?").run(englishLabel, legacyLabel);
+  db.prepare("UPDATE listings SET category = ? WHERE category = ?").run(englishLabel, legacyLabel);
 }
 const listingColumns = db.prepare("PRAGMA table_info(listings)").all();
 if (!listingColumns.some((column) => column.name === "seller_user_id")) {
@@ -138,7 +149,7 @@ db.prepare(`
   UPDATE scans
   SET status = 'failed',
       progress = NULL,
-      error = '서버가 다시 시작되어 이전 스캔이 중단됐어요. 새 스캔을 시작해 주세요.'
+      error = 'The server restarted and interrupted the previous scan. Start a new scan.'
   WHERE status IN ('queued', 'processing')
 `).run();
 
@@ -185,11 +196,11 @@ app.use((req, res, next) => {
           hostname === "127.0.0.1" ||
           hostname === "[::1]";
         if (!sameHost && !loopback && !configuredOrigins.has(originUrl.origin)) {
-          res.status(403).json({ error: "허용된 RealResale 주소에서만 요청할 수 있어요." });
+          res.status(403).json({ error: "Requests are allowed only from the configured RealResale address." });
           return;
         }
       } catch {
-        res.status(403).json({ error: "요청 출처를 확인할 수 없어요." });
+        res.status(403).json({ error: "Could not verify the request origin." });
         return;
       }
     }
@@ -216,7 +227,7 @@ app.use((req, _res, next) => {
 
 function requireAuth(req, res, next) {
   if (!req.authUser) {
-    res.status(401).json({ error: "계정에 로그인한 뒤 이용해 주세요." });
+    res.status(401).json({ error: "Sign in to your account to continue." });
     return;
   }
   next();
@@ -278,7 +289,7 @@ const upload = multer({
   limits: { files: maxImageCount, fileSize: 20 * 1024 * 1024 },
   fileFilter: (_req, file, callback) => {
     if (!supportedImageTypes.has(file.mimetype)) {
-      callback(new Error("JPEG, PNG, WebP 또는 AVIF 이미지만 스캔할 수 있어요."));
+      callback(new Error("Only JPEG, PNG, WebP, or AVIF images can be scanned."));
       return;
     }
     callback(null, true);
@@ -294,7 +305,7 @@ const videoUpload = multer({
     const supportedType = ["video/mp4", "video/quicktime", "video/webm", "video/x-m4v"].includes(file.mimetype);
     const supportedExtension = /\.(mov|mp4|m4v|webm)$/i.test(file.originalname);
     if (!supportedType && !supportedExtension) {
-      callback(new Error("MOV, MP4, M4V 또는 WebM 동영상만 사용할 수 있어요."));
+      callback(new Error("Only MOV, MP4, M4V, or WebM videos are supported."));
       return;
     }
     callback(null, true);
@@ -334,7 +345,7 @@ async function copyUploadedFile(source, destination, expectedSize) {
       const copiedFile = await fs.stat(destination);
       if (copiedFile.size !== expectedSize) {
         await removeTemporaryPaths([destination]);
-        throw new Error("업로드된 사진을 스캔 저장소에 완전히 복사하지 못했어요.");
+        throw new Error("Could not copy the complete uploaded image into scan storage.");
       }
       return;
     } catch (error) {
@@ -389,7 +400,7 @@ function runFfmpeg(args, description, timeout = 5 * 60 * 1000) {
     let spawnError;
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error(`${description} 단계가 제한 시간 안에 끝나지 않았어요.`));
+      reject(new Error(`${description} timed out.`));
     }, timeout);
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
@@ -401,10 +412,10 @@ function runFfmpeg(args, description, timeout = 5 * 60 * 1000) {
     child.on("close", (code) => {
       clearTimeout(timer);
       if (spawnError) {
-        reject(new Error(`동영상 처리 프로그램을 실행할 수 없어요: ${spawnError.message}`));
+        reject(new Error(`Could not start the video processing program: ${spawnError.message}`));
       } else if (code !== 0) {
         const details = stderr.split(/\r?\n/).filter(Boolean).slice(-5).join(" ");
-        reject(new Error(`${description}에 실패했어요.${details ? ` ${details}` : ""}`));
+        reject(new Error(`${description} failed.${details ? ` ${details}` : ""}`));
       } else {
         resolve(stderr);
       }
@@ -427,7 +438,7 @@ async function getVideoDuration(filePath) {
     child.on("close", () => resolve(stderr));
   });
   const duration = metadata.match(/Duration:\s*(\d+):(\d{2}):(\d+(?:\.\d+)?)/);
-  if (!duration) throw new Error("동영상 길이를 읽지 못했어요. 재생 가능한 MOV, MP4 또는 WebM인지 확인해 주세요.");
+  if (!duration) throw new Error("Could not read the video duration. Check that it is a playable MOV, MP4, or WebM file.");
   return Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3]);
 }
 
@@ -480,7 +491,7 @@ async function runColmap(
       : null;
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error(`${stepName} 단계가 45분 안에 끝나지 않았어요. 사진 수를 줄여 다시 시도해 주세요.`));
+      reject(new Error(`${stepName} did not finish within 45 minutes. Reduce the number of images and try again.`));
     }, timeout);
 
     child.stderr.setEncoding("utf8");
@@ -494,15 +505,15 @@ async function runColmap(
       clearTimeout(timer);
       if (progressTimer) clearInterval(progressTimer);
       if (spawnError) {
-        reject(new Error(`COLMAP을 실행할 수 없습니다: ${spawnError.message}`));
+        reject(new Error(`Could not start COLMAP: ${spawnError.message}`));
       } else if (code !== 0) {
         const details = stderr.split(/\r?\n/).filter(Boolean).slice(-8).join(" ");
         const cudaHint = /cuda|gpu|patch.?match/i.test(details)
-          ? " PatchMatchStereo의 GPU/CUDA 지원을 확인해 주세요."
+          ? " Check GPU/CUDA support for PatchMatchStereo."
           : "";
         reject(
           new Error(
-            `${stepName} 단계에 실패했습니다.${cudaHint}${details ? ` ${details}` : ` (종료 코드 ${code ?? signal})`}`,
+            `${stepName} failed.${cudaHint}${details ? ` ${details}` : ` (exit code ${code ?? signal})`}`,
           ),
         );
       } else {
@@ -537,7 +548,7 @@ async function drainQueue() {
   try {
     await reconstructScan(scanId);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "알 수 없는 재구성 오류가 발생했어요.";
+    const message = error instanceof Error ? error.message : "An unknown reconstruction error occurred.";
     console.error(`3D reconstruction failed for scan ${scanId}:`, message);
     db.prepare("UPDATE scans SET status = 'failed', progress = NULL, error = ? WHERE id = ?").run(
       message.slice(0, 1600),
@@ -550,13 +561,13 @@ async function drainQueue() {
 }
 
 async function extractVideoFrames(scanId, directory, videos) {
-  if (!ffmpegPath) throw new Error("동영상 처리를 위한 FFmpeg 실행 파일을 찾을 수 없어요.");
+  if (!ffmpegPath) throw new Error("Could not find the FFmpeg executable required to process videos.");
   const videoDirectory = path.join(directory, "videos");
   const extractedDirectory = path.join(directory, "extracted");
   const imagesDirectory = path.join(directory, "images");
   await fs.mkdir(extractedDirectory, { recursive: true });
   await fs.mkdir(imagesDirectory, { recursive: true });
-  await setProgress(scanId, "두 전체 경로와 근접 세부 영상 분석", 2);
+  await setProgress(scanId, "Analyzing two full-item routes and the close-up video", 2);
 
   const durations = new Map();
   for (const video of videos) {
@@ -566,15 +577,15 @@ async function extractVideoFrames(scanId, directory, videos) {
     if (duration < minimumDuration || duration > maximumDuration + (video.stage === detailVideoStage ? 1 : 0)) {
       throw new Error(
         video.stage === detailVideoStage
-          ? `근접 세부 영상은 ${minDetailVideoSeconds}~${maxDetailVideoSeconds}초로 촬영해 주세요.`
-          : `${video.stage} 영상은 3~${maxVideoSeconds}초로 촬영해 주세요.`,
+          ? `Record the close-up video for ${minDetailVideoSeconds}–${maxDetailVideoSeconds} seconds.`
+          : `Record the ${video.stage} video for 3–${maxVideoSeconds} seconds.`,
       );
     }
     durations.set(video.stage, duration);
   }
   const routeDuration = videoSectors.reduce((total, stage) => total + (durations.get(stage) || 0), 0);
   if (routeDuration > maxTotalVideoSeconds) {
-    throw new Error("두 이동 경로의 전체 촬영 시간이 제한을 넘었습니다. 경로 영상을 다시 확인하세요.");
+    throw new Error("The combined duration of the two route videos exceeds the limit. Review the route videos.");
   }
 
   const imageNames = [];
@@ -602,7 +613,7 @@ async function extractVideoFrames(scanId, directory, videos) {
         path.join(stageDirectory, "%03d.jpg"),
         "-y",
       ],
-      `${video.stage} 촬영 영상의 선명한 프레임 추출`,
+      `Extracting sharp frames from the ${video.stage} video`,
     );
     const frameFiles = (await fs.readdir(stageDirectory))
       .filter((name) => /^\d{3}\.jpg$/.test(name))
@@ -620,19 +631,19 @@ async function extractVideoFrames(scanId, directory, videos) {
     const sectorImageCount = imageNames.length - sectorImageStart;
     if (sectorImageCount < minFramesPerSector) {
       throw new Error(
-        `${video.stage} 이동 경로에서 유효한 프레임을 ${sectorImageCount}장만 추출했어요. 각 경로에서 최소 ${minFramesPerSector}장이 필요합니다.`,
+        `Only ${sectorImageCount} valid frames were extracted from the ${video.stage} route. Each route requires at least ${minFramesPerSector} frames.`,
       );
     }
     await setProgress(
       scanId,
-      `${video.stage} 이동 경로의 프레임을 검사`,
+      `Checking frames from the ${video.stage} route`,
       Math.min(20, 2 + Math.floor(((index + 1) / routeVideos.length) * 18)),
     );
   }
 
   if (imageNames.length < minImageCount) {
     throw new Error(
-      `두 이동 경로에서 유효한 프레임 ${imageNames.length}장만 추출했어요. 최소 ${minImageCount}장이 필요합니다.`,
+      `Only ${imageNames.length} valid frames were extracted from the two routes. At least ${minImageCount} are required.`,
     );
   }
   db.prepare("UPDATE scans SET image_count = ?, images_json = ? WHERE id = ?").run(
@@ -643,13 +654,13 @@ async function extractVideoFrames(scanId, directory, videos) {
 
   const detailVideo = videos.find((video) => video.stage === detailVideoStage);
   if (!detailVideo) {
-    throw new Error("상품의 미세한 상태를 확인할 근접 세부 영상이 필요해요.");
+    throw new Error("A close-up video is required to inspect fine item details.");
   }
   const detailDirectory = path.join(directory, "details");
   const extractedDetailsDirectory = path.join(directory, "detail-extracted");
   await fs.mkdir(detailDirectory, { recursive: true });
   await fs.mkdir(extractedDetailsDirectory, { recursive: true });
-  await setProgress(scanId, "4K 근접 세부 프레임의 해상도와 초점을 검사", 23);
+  await setProgress(scanId, "Checking resolution and focus of 4K close-up frames", 23);
   await runFfmpeg(
     [
       "-hide_banner",
@@ -666,7 +677,7 @@ async function extractVideoFrames(scanId, directory, videos) {
       path.join(extractedDetailsDirectory, "%03d.jpg"),
       "-y",
     ],
-    "근접 세부 영상에서 고해상도 프레임 추출",
+    "Extracting high-resolution frames from the close-up video",
   );
   const detailFiles = (await fs.readdir(extractedDetailsDirectory))
     .filter((name) => /^\d{3}\.jpg$/.test(name))
@@ -692,7 +703,7 @@ async function extractVideoFrames(scanId, directory, videos) {
   }
   if (detailCandidates.length < minDetailFrames) {
     throw new Error(
-      `근접 영상에서 ${minDetailResolution}px 이상 원본 프레임을 ${minDetailFrames}장 확보하지 못했어요. 카메라의 4K 촬영 설정과 초점을 확인해 다시 촬영하세요.`,
+      `Could not obtain ${minDetailFrames} original frames at ${minDetailResolution}px or higher from the close-up video. Check the camera's 4K setting and focus, then record again.`,
     );
   }
   const sortedSharpness = detailCandidates.map((frame) => frame.sharpness).sort((left, right) => left - right);
@@ -700,7 +711,7 @@ async function extractVideoFrames(scanId, directory, videos) {
   const selectedDetails = detailCandidates.filter((frame) => frame.sharpness >= sharpnessThreshold);
   if (selectedDetails.length < minDetailFrames) {
     throw new Error(
-      `초점이 선명한 4K 근접 프레임이 ${minDetailFrames}장 미만이에요. 조명을 밝히고 카메라를 천천히 움직여 다시 촬영하세요.`,
+      `Fewer than ${minDetailFrames} sharp 4K close-up frames were found. Improve the lighting, move the camera slowly, and record again.`,
     );
   }
   const detailRecords = [];
@@ -714,7 +725,7 @@ async function extractVideoFrames(scanId, directory, videos) {
     JSON.stringify(detailRecords),
     scanId,
   );
-  await setProgress(scanId, "고해상도 근접 결함 증거를 저장", 25);
+  await setProgress(scanId, "Saving high-resolution close-up evidence", 25);
 }
 
 async function reconstructScan(scanId) {
@@ -732,14 +743,14 @@ async function reconstructScan(scanId) {
   }
 
   if (!reconstructionAvailable) {
-    throw new Error("서버에서 COLMAP을 찾을 수 없어요. COLMAP을 설치한 뒤 서버를 다시 시작해 주세요.");
+    throw new Error("COLMAP was not found on the server. Install COLMAP and restart the server.");
   }
 
   await fs.mkdir(imagesDir, { recursive: true });
   await fs.mkdir(sparseDir, { recursive: true });
   await fs.mkdir(denseDir, { recursive: true });
 
-  await setProgress(scanId, "추출한 고해상도 프레임 정규화", 25);
+  await setProgress(scanId, "Normalizing extracted high-resolution frames", 25);
   for (let index = 0; index < imageRows.images.length; index += 1) {
     const filename = imageRows.images[index];
     await sharp(path.join(directory, filename), { limitInputPixels: 70_000_000 })
@@ -748,11 +759,11 @@ async function reconstructScan(scanId) {
       .toFile(path.join(imagesDir, `${String(index).padStart(3, "0")}.jpg`));
     await setProgress(
       scanId,
-      "추출한 고해상도 프레임 정규화",
+      "Normalizing extracted high-resolution frames",
       25 + Math.floor(((index + 1) / imageRows.images.length) * 8),
     );
   }
-  await setProgress(scanId, "3D 특징점과 카메라 정보 분석", 33);
+  await setProgress(scanId, "Analyzing 3D features and camera data", 33);
 
   const base = { cwd: workDir, scanId };
   await runColmap(
@@ -774,7 +785,7 @@ async function reconstructScan(scanId) {
         "1",
       ],
     },
-    "사진의 특징점과 카메라 위치 분석",
+    "Analyzing image features and camera positions",
     45 * 60 * 1000,
     { start: 33, end: 43 },
   );
@@ -783,13 +794,13 @@ async function reconstructScan(scanId) {
       ...base,
       command: ["exhaustive_matcher", "--database_path", databasePath, "--FeatureMatching.use_gpu", "1"],
     },
-    "겹쳐 찍은 사진들의 연결 확인",
+    "Matching overlapping photos",
     45 * 60 * 1000,
     { start: 43, end: 53 },
   );
   await runColmap(
     { ...base, command: ["mapper", "--database_path", databasePath, "--image_path", imagesDir, "--output_path", sparseDir] },
-    "촬영된 사진으로 3D 카메라 위치 계산",
+    "Calculating 3D camera positions from the captured images",
     45 * 60 * 1000,
     { start: 53, end: 63 },
   );
@@ -798,7 +809,7 @@ async function reconstructScan(scanId) {
     .filter((entry) => entry.isDirectory())
     .sort((left, right) => Number(left.name) - Number(right.name));
   if (sparseModels.length === 0) {
-    throw new Error("겹치는 특징점을 충분히 찾지 못했어요. 선명한 사진을 여러 각도에서 다시 찍어 주세요.");
+    throw new Error("Not enough matching features were found. Take sharp photos from multiple angles and try again.");
   }
   let sparseModel;
   let registeredImageCount = 0;
@@ -820,7 +831,7 @@ async function reconstructScan(scanId) {
           "TXT",
         ],
       },
-      "각 3D 후보에 연결된 사진 수 확인",
+      "Counting images registered to each 3D candidate",
       45 * 60 * 1000,
       {
         start: 63 + Math.floor((candidateIndex / sparseModels.length) * 5),
@@ -842,24 +853,24 @@ async function reconstructScan(scanId) {
   }
 
   if (!sparseModel) {
-    throw new Error("사진에서 3D 카메라 위치를 검증할 수 없어요. 여러 각도에서 선명한 사진을 다시 찍어 주세요.");
+    throw new Error("Could not verify 3D camera positions from the images. Take sharp photos from multiple angles and try again.");
   }
   const requiredImageCount = Math.ceil(imageRows.images.length * 0.7);
   if (registeredImageCount < requiredImageCount) {
     throw new Error(
-      `사진 ${imageRows.images.length}장 중 ${registeredImageCount}장만 3D 공간에 연결됐어요. 최소 ${requiredImageCount}장이 필요하므로 촬영 방향과 사진 간 겹치는 영역을 확인해 주세요.`,
+      `Only ${registeredImageCount} of ${imageRows.images.length} images were registered in 3D space. At least ${requiredImageCount} are required. Check the camera path and overlap between images.`,
     );
   }
 
   await runColmap(
     { ...base, command: ["image_undistorter", "--image_path", imagesDir, "--input_path", sparseModel, "--output_path", denseDir, "--output_type", "COLMAP", "--max_image_size", "4096"] },
-    "고해상도 사진을 3D 공간에 정렬",
+    "Aligning high-resolution images in 3D space",
     45 * 60 * 1000,
     { start: 68, end: 74 },
   );
   await runColmap(
     { ...base, command: ["patch_match_stereo", "--workspace_path", denseDir, "--workspace_format", "COLMAP", "--PatchMatchStereo.geom_consistency", "true"] },
-    "여러 각도에서 표면 깊이와 색상 복원",
+    "Reconstructing surface depth and color from multiple angles",
     90 * 60 * 1000,
     {
       start: 74,
@@ -871,17 +882,17 @@ async function reconstructScan(scanId) {
   const fusedPath = path.join(denseDir, "fused.ply");
   await runColmap(
     { ...base, command: ["stereo_fusion", "--workspace_path", denseDir, "--workspace_format", "COLMAP", "--input_type", "geometric", "--output_path", fusedPath] },
-    "색상이 포함된 3D 점군 생성",
+    "Generating a color 3D point cloud",
     45 * 60 * 1000,
     { start: 90, end: 96 },
   );
-  await setProgress(scanId, "고밀도 컬러 3D 표면을 확인", 96);
+  await setProgress(scanId, "Verifying the high-density color 3D surface", 96);
   const modelPath = path.join(directory, "model.ply");
   await fs.copyFile(fusedPath, modelPath, fs.constants.COPYFILE_EXCL);
 
   const modelStat = await fs.stat(modelPath);
   if (modelStat.size < 1_000_000) {
-    throw new Error("컬러 3D 점군이 충분히 복원되지 않아 등록할 수 없어요. 모든 면을 더 선명하게 촬영해 주세요.");
+    throw new Error("The color 3D point cloud is not complete enough to publish. Capture every side more clearly.");
   }
   const modelFile = await fs.open(modelPath, "r");
   const headerBuffer = Buffer.alloc(8192);
@@ -897,10 +908,10 @@ async function reconstructScan(scanId) {
     /\bproperty uchar green\b/.test(modelHeader) &&
     /\bproperty uchar blue\b/.test(modelHeader);
   if (!modelHeader.startsWith("ply") || vertices < 20_000 || !hasColor) {
-    throw new Error("실제 색상 정보가 포함된 고밀도 3D 점군이 완성되지 않았어요. 촬영 영상을 다시 확인해 주세요.");
+    throw new Error("A high-density 3D point cloud with real color data was not completed. Review the capture videos.");
   }
 
-  await setProgress(scanId, "색상 포함 3D 결과 검증 완료", 99);
+  await setProgress(scanId, "Color 3D result verified", 99);
   db.prepare("UPDATE scans SET status = 'ready', progress = NULL, progress_percent = 100, error = NULL WHERE id = ?").run(scanId);
 }
 
@@ -917,7 +928,7 @@ app.post("/api/auth/register", async (req, res) => {
     Buffer.byteLength(password, "utf8") < 10 ||
     Buffer.byteLength(password, "utf8") > 128
   ) {
-    res.status(400).json({ error: "사용자명은 영문·숫자·밑줄 3~24자, 비밀번호는 10~128바이트로 입력해 주세요." });
+    res.status(400).json({ error: "Use 3–24 letters, numbers, or underscores for the username and a 10–128 byte password." });
     return;
   }
   const { salt, hash } = await createPasswordRecord(password);
@@ -931,7 +942,7 @@ app.post("/api/auth/register", async (req, res) => {
     );
   } catch (error) {
     if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
-      res.status(409).json({ error: "이미 사용 중인 사용자명이에요." });
+      res.status(409).json({ error: "That username is already taken." });
       return;
     }
     throw error;
@@ -947,7 +958,7 @@ app.post("/api/auth/login", async (req, res) => {
     typeof password !== "string" ||
     Buffer.byteLength(password, "utf8") > 128
   ) {
-    res.status(400).json({ error: "사용자명과 비밀번호를 확인해 주세요." });
+    res.status(400).json({ error: "Check your username and password." });
     return;
   }
   const account = db.prepare("SELECT id, username, password_salt, password_hash FROM users WHERE username = ? COLLATE NOCASE").get(username);
@@ -955,7 +966,7 @@ app.post("/api/auth/login", async (req, res) => {
     ? await verifyPassword(password, account.password_salt, account.password_hash)
     : false;
   if (!valid) {
-    res.status(401).json({ error: "사용자명 또는 비밀번호가 올바르지 않아요." });
+    res.status(401).json({ error: "Incorrect username or password." });
     return;
   }
   issueSession(req, res, account.id);
@@ -1035,7 +1046,7 @@ app.get("/api/scans", (req, res) => {
 app.post("/api/scans", requireAuth, (req, res, next) => {
   const contentLength = Number(req.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > maxScanBytes) {
-    res.status(413).json({ error: "스캔 사진 전체 용량은 512MB 이하여야 해요." });
+    res.status(413).json({ error: "The total size of scan images must not exceed 512 MB." });
     return;
   }
   upload.array("images", maxImageCount)(req, res, async (uploadError) => {
@@ -1048,17 +1059,17 @@ app.post("/api/scans", requireAuth, (req, res, next) => {
     const files = req.files || [];
     if (files.length < minImageCount) {
       await cleanupUploads(files);
-      res.status(400).json({ error: `서버 재구성에는 최소 ${minImageCount}장의 사진이 필요해요. 현재 ${files.length}장입니다.` });
+      res.status(400).json({ error: `At least ${minImageCount} images are required for server reconstruction. Received ${files.length}.` });
       return;
     }
     if (files.reduce((total, file) => total + file.size, 0) > maxScanBytes) {
       await cleanupUploads(files);
-      res.status(413).json({ error: "스캔 사진 전체 용량은 512MB 이하여야 해요." });
+      res.status(413).json({ error: "The total size of scan images must not exceed 512 MB." });
       return;
     }
     if (runningJobs + jobQueue.length >= maxScansInFlight + maxQueuedScans) {
       await cleanupUploads(files);
-      res.status(503).json({ error: "현재 재구성 작업이 가득 찼어요. 잠시 후 다시 시도해 주세요." });
+      res.status(503).json({ error: "The reconstruction queue is full. Try again shortly." });
       return;
     }
     const scanId = crypto.randomUUID();
@@ -1070,19 +1081,19 @@ app.post("/api/scans", requireAuth, (req, res, next) => {
         try {
           const metadata = await sharp(files[index].path, { limitInputPixels: 70_000_000 }).metadata();
           if (!["jpeg", "png", "webp", "avif"].includes(metadata.format)) {
-            throw new Error("파일 내용이 올바른 JPEG, PNG, WebP 또는 AVIF 이미지가 아니에요.");
+            throw new Error("The file contents are not a valid JPEG, PNG, WebP, or AVIF image.");
           }
           if (!metadata.width || !metadata.height || metadata.width < 800 || metadata.height < 600) {
-            throw new Error("상품을 자세히 확인할 수 있도록 사진 한 장당 최소 800 × 600 픽셀이 필요해요.");
+            throw new Error("Each image must be at least 800 × 600 pixels for detailed item inspection.");
           }
           imageFormats.push(metadata.format);
         } catch (error) {
           throw new Error(
-            error instanceof Error && error.message.includes("파일 내용")
+            error instanceof Error && error.message.includes("file contents")
               ? error.message
               : error instanceof Error && error.message.includes("800 × 600")
                 ? error.message
-                : `사진 ${index + 1}장을 읽을 수 없어요. JPEG, PNG, WebP 또는 AVIF 원본을 확인해 주세요.`,
+                : `Could not read image ${index + 1}. Check that the original is a JPEG, PNG, WebP, or AVIF file.`,
           );
         }
       }
@@ -1090,7 +1101,7 @@ app.post("/api/scans", requireAuth, (req, res, next) => {
       if (!reconstructionAvailable) {
         await cleanupUploads(files);
         res.status(503).json({
-          error: "서버에서 COLMAP 또는 CUDA GPU를 찾을 수 없어요. CUDA를 지원하는 COLMAP과 NVIDIA GPU를 설정하고 서버를 다시 시작해 주세요.",
+          error: "COLMAP or a CUDA GPU was not found on the server. Set up CUDA-enabled COLMAP and an NVIDIA GPU, then restart the server.",
         });
         return;
       }
@@ -1111,7 +1122,7 @@ app.post("/api/scans", requireAuth, (req, res, next) => {
       await cleanupUploads(files);
       db.prepare(
         "INSERT INTO scans (id, status, image_count, images_json, progress, owner_user_id) VALUES (?, 'queued', ?, ?, ?, ?)",
-      ).run(scanId, files.length, JSON.stringify(imageNames), "재구성 대기 중", req.authUser.id);
+      ).run(scanId, files.length, JSON.stringify(imageNames), "Queued for reconstruction", req.authUser.id);
       res.status(202).json({ scan: publicScan(getScan.get(scanId)) });
       scheduleScan(scanId);
     } catch (error) {
@@ -1121,12 +1132,12 @@ app.post("/api/scans", requireAuth, (req, res, next) => {
       console.error("Scan upload failed:", error);
       res.status(serverError ? 500 : 400).json({
         error: isWindowsFileLockError(error)
-          ? "사진 파일이 다른 프로그램에서 사용 중이라 저장하지 못했어요. 잠시 후 다시 시도해 주세요."
+          ? "The image file is in use by another program and could not be saved. Try again shortly."
           : serverError
-            ? "사진을 처리하거나 저장하지 못했어요. 서버 오류를 확인해 주세요."
+            ? "Could not process or save the images. Check the server error log."
             : error instanceof Error
               ? error.message
-              : "사진을 확인하는 중 오류가 발생했어요.",
+              : "An error occurred while checking the images.",
       });
     }
   });
@@ -1135,7 +1146,7 @@ app.post("/api/scans", requireAuth, (req, res, next) => {
 app.post("/api/scans/videos", requireAuth, (req, res, next) => {
   const contentLength = Number(req.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > maxScanBytes) {
-    res.status(413).json({ error: "전체 촬영 영상 용량은 512MB 이하여야 해요." });
+    res.status(413).json({ error: "The total size of the capture videos must not exceed 512 MB." });
     return;
   }
   videoUpload.array("videos", requiredVideoStages.length)(req, res, async (uploadError) => {
@@ -1155,12 +1166,12 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
       requiredVideoStages.some((stage) => !stages.includes(stage))
     ) {
       await cleanupUploads(files);
-      res.status(400).json({ error: "두 이동 경로 영상과 고해상도 근접 세부 영상이 각각 필요해요." });
+      res.status(400).json({ error: "Two route videos and one high-resolution close-up video are required." });
       return;
     }
     if (totalBytes > maxScanBytes) {
       await cleanupUploads(files);
-      res.status(413).json({ error: "전체 촬영 영상 용량은 512MB 이하여야 해요." });
+      res.status(413).json({ error: "The total size of the capture videos must not exceed 512 MB." });
       return;
     }
     if (
@@ -1176,18 +1187,18 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
       parsedPrice > 1_000_000_000
     ) {
       await cleanupUploads(files);
-      res.status(400).json({ error: "상품명, 설명, 카테고리와 0~10억 원 사이의 가격을 올바르게 입력해 주세요." });
+      res.status(400).json({ error: "Enter a valid title, description, category, and price between 0 and 1,000,000,000 KRW." });
       return;
     }
     if (runningJobs + jobQueue.length >= maxScansInFlight + maxQueuedScans) {
       await cleanupUploads(files);
-      res.status(503).json({ error: "현재 재구성 작업이 가득 찼어요. 잠시 후 다시 시도해 주세요." });
+      res.status(503).json({ error: "The reconstruction queue is full. Try again shortly." });
       return;
     }
     if (!reconstructionAvailable) {
       await cleanupUploads(files);
       res.status(503).json({
-        error: "CUDA 지원 COLMAP과 NVIDIA GPU가 필요해요. GPU 재구성 서버를 설정한 뒤 다시 시도해 주세요.",
+        error: "CUDA-enabled COLMAP and an NVIDIA GPU are required. Set up a GPU reconstruction server and try again.",
       });
       return;
     }
@@ -1215,7 +1226,7 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
         VALUES (?, 'queued', 0, '[]', ?, ?, ?, ?, ?, ?, ?)
       `).run(
         scanId,
-        "GPU 재구성 대기 중",
+        "Queued for GPU reconstruction",
         JSON.stringify(videos),
         title.trim(),
         description.trim(),
@@ -1232,12 +1243,12 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
       console.error("Scan video upload failed:", error);
       res.status(serverError ? 500 : 400).json({
         error: isWindowsFileLockError(error)
-          ? "동영상 파일이 다른 프로그램에서 사용 중이라 저장하지 못했어요. 다시 시도해 주세요."
+          ? "The video file is in use by another program and could not be saved. Try again."
           : serverError
-            ? "촬영 영상을 안전하게 저장하지 못했어요."
+            ? "Could not safely save the capture videos."
             : error instanceof Error
               ? error.message
-              : "촬영 영상을 처리하지 못했어요.",
+              : "Could not process the capture videos.",
       });
     }
   });
@@ -1259,16 +1270,16 @@ app.put("/api/scans/:id/details", requireAuth, (req, res) => {
     parsedPrice < 0 ||
     parsedPrice > 1_000_000_000
   ) {
-    res.status(400).json({ error: "상품명, 설명, 카테고리와 0~10억 원 사이의 가격을 올바르게 입력해 주세요." });
+    res.status(400).json({ error: "Enter a valid title, description, category, and price between 0 and 1,000,000,000 KRW." });
     return;
   }
   const scan = getScan.get(req.params.id);
   if (!scan || scan.owner_user_id !== req.authUser.id || scan.status === "failed") {
-    res.status(404).json({ error: "수정할 스캔 작업을 찾을 수 없어요." });
+    res.status(404).json({ error: "Could not find the scan to update." });
     return;
   }
   if (scan.status === "ready" && db.prepare("SELECT 1 FROM listings WHERE scan_id = ?").get(req.params.id)) {
-    res.status(409).json({ error: "이미 등록된 상품 정보는 수정할 수 없어요." });
+    res.status(409).json({ error: "Details for an already-published listing cannot be changed." });
     return;
   }
   db.prepare(
@@ -1279,7 +1290,7 @@ app.put("/api/scans/:id/details", requireAuth, (req, res) => {
 
 app.post("/api/listings", (req, res) => {
   if (!req.authUser) {
-    res.status(401).json({ error: "로그인한 판매자만 매물을 등록할 수 있어요." });
+    res.status(401).json({ error: "Sign in as a seller to publish a listing." });
     return;
   }
   const { title, description = "", category, price, scanId } = req.body || {};
@@ -1297,32 +1308,32 @@ app.post("/api/listings", (req, res) => {
     typeof scanId !== "string" ||
     !idPattern.test(scanId)
   ) {
-    res.status(400).json({ error: "상품명, 설명, 카테고리, 0~10억 원 사이의 가격을 올바르게 입력해 주세요." });
+    res.status(400).json({ error: "Enter a valid title, description, category, and price between 0 and 1,000,000,000 KRW." });
     return;
   }
 
   const scan = getScan.get(scanId);
   if (!scan || scan.status !== "ready") {
-    res.status(409).json({ error: "플랫폼에서 실제 3D 재구성을 완료한 스캔만 매물로 등록할 수 있어요." });
+    res.status(409).json({ error: "Only scans reconstructed by the platform can be published as listings." });
     return;
   }
   if (scan.owner_user_id !== req.authUser.id) {
-    res.status(403).json({ error: "본인 계정으로 만든 스캔만 매물로 등록할 수 있어요." });
+    res.status(403).json({ error: "You can publish only scans created by your account." });
     return;
   }
   const uploadedStages = new Set(JSON.parse(scan.videos_json || "[]").map((video) => video.stage));
   if (videoSectors.some((sector) => !uploadedStages.has(sector))) {
-    res.status(409).json({ error: "두 이동 경로를 모두 담은 스캔만 매물로 등록할 수 있어요." });
+    res.status(409).json({ error: "Only scans that include both capture routes can be published." });
     return;
   }
   if (!uploadedStages.has(detailVideoStage)) {
-    res.status(409).json({ error: "4K 근접 결함 촬영 원본이 있는 스캔만 매물로 등록할 수 있어요." });
+    res.status(409).json({ error: "Only scans with an original 4K close-up video can be published." });
     return;
   }
   const details = JSON.parse(scan.details_json || "[]");
   if (details.length < minDetailFrames) {
     res.status(409).json({
-      error: `4K 해상도와 선명도를 확인한 근접 프레임 ${minDetailFrames}장 이상이 있는 스캔만 등록할 수 있어요.`,
+      error: `Only scans with at least ${minDetailFrames} close-up frames verified for 4K resolution and sharpness can be published.`,
     });
     return;
   }
@@ -1334,7 +1345,7 @@ app.post("/api/listings", (req, res) => {
     ).run(listingId, scanId, title.trim(), description.trim(), category.trim(), price, req.authUser.id);
   } catch (error) {
     if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
-      res.status(409).json({ error: "이 스캔은 이미 매물로 등록되었어요." });
+      res.status(409).json({ error: "This scan has already been published as a listing." });
       return;
     }
     throw error;
@@ -1345,7 +1356,7 @@ app.post("/api/listings", (req, res) => {
 
 app.post("/api/listings/:id/conversations", requireAuth, (req, res) => {
   if (!idPattern.test(req.params.id)) {
-    res.status(404).json({ error: "상품을 찾을 수 없어요." });
+    res.status(404).json({ error: "Item not found." });
     return;
   }
   const listing = db.prepare(`
@@ -1356,11 +1367,11 @@ app.post("/api/listings/:id/conversations", requireAuth, (req, res) => {
     WHERE l.id = ?
   `).get(req.params.id);
   if (!listing) {
-    res.status(404).json({ error: "판매 중인 상품을 찾을 수 없어요." });
+    res.status(404).json({ error: "Active listing not found." });
     return;
   }
   if (!listing.seller_user_id || listing.seller_user_id === req.authUser.id) {
-    res.status(409).json({ error: "본인이 판매 중인 상품에는 문의할 수 없어요." });
+    res.status(409).json({ error: "You cannot message yourself about your own listing." });
     return;
   }
   db.prepare(`
@@ -1412,7 +1423,7 @@ function getConversationAccess(conversationId, userId) {
 app.get("/api/conversations/:id/messages", requireAuth, (req, res) => {
   const conversation = getConversationAccess(req.params.id, req.authUser.id);
   if (!conversation) {
-    res.status(404).json({ error: "이 대화를 볼 권한이 없거나 대화가 없습니다." });
+    res.status(404).json({ error: "This conversation does not exist or you do not have access to it." });
     return;
   }
   const messages = db.prepare(`
@@ -1430,12 +1441,12 @@ app.get("/api/conversations/:id/messages", requireAuth, (req, res) => {
 app.post("/api/conversations/:id/messages", requireAuth, (req, res) => {
   const conversation = getConversationAccess(req.params.id, req.authUser.id);
   if (!conversation) {
-    res.status(404).json({ error: "이 대화에 메시지를 보낼 권한이 없거나 대화가 없습니다." });
+    res.status(404).json({ error: "This conversation does not exist or you do not have permission to send messages." });
     return;
   }
   const { body } = req.body || {};
   if (typeof body !== "string" || !body.trim() || body.trim().length > 2000) {
-    res.status(400).json({ error: "메시지는 1~2,000자로 입력해 주세요." });
+    res.status(400).json({ error: "Messages must contain 1–2,000 characters." });
     return;
   }
   const messageId = crypto.randomUUID();
@@ -1459,7 +1470,7 @@ app.post("/api/conversations/:id/messages", requireAuth, (req, res) => {
 app.get("/media/scans/:id/model.ply", async (req, res, next) => {
   try {
     if (!idPattern.test(req.params.id) || getScan.get(req.params.id)?.status !== "ready") {
-      res.status(404).json({ error: "등록 가능한 스캔 모델이 없습니다." });
+      res.status(404).json({ error: "No reconstructed scan model is available to publish." });
       return;
     }
     res.setHeader("Content-Type", "application/octet-stream");
@@ -1476,7 +1487,7 @@ app.get("/media/scans/:id/images/:filename", async (req, res, next) => {
     const row = idPattern.test(req.params.id) ? getScan.get(req.params.id) : null;
     const filename = req.params.filename;
     if (!row || row.status !== "ready" || !JSON.parse(row.images_json).includes(filename)) {
-      res.status(404).json({ error: "원본 사진을 찾을 수 없습니다." });
+      res.status(404).json({ error: "Original image not found." });
       return;
     }
     res.setHeader("Cache-Control", "public, max-age=86400");
@@ -1493,7 +1504,7 @@ app.get("/media/scans/:id/videos/:stage", async (req, res, next) => {
       ? JSON.parse(row.videos_json || "[]").find((item) => item.stage === req.params.stage)
       : null;
     if (!video) {
-      res.status(404).json({ error: "촬영 원본 영상을 찾을 수 없어요." });
+      res.status(404).json({ error: "Original capture video not found." });
       return;
     }
     res.setHeader("Cache-Control", "public, max-age=86400");
@@ -1509,7 +1520,7 @@ app.get("/media/scans/:id/details/:filename", async (req, res, next) => {
     const filename = req.params.filename;
     const details = row && row.status === "ready" ? JSON.parse(row.details_json || "[]") : [];
     if (!details.some((frame) => frame.name === filename)) {
-      res.status(404).json({ error: "근접 세부 사진을 찾을 수 없습니다." });
+      res.status(404).json({ error: "Close-up detail photo not found." });
       return;
     }
     res.setHeader("Cache-Control", "public, max-age=86400");
@@ -1520,10 +1531,10 @@ app.get("/media/scans/:id/details/:filename", async (req, res, next) => {
 });
 
 app.use("/api", (_req, res) => {
-  res.status(404).json({ error: "API 경로를 찾을 수 없습니다." });
+  res.status(404).json({ error: "API route not found." });
 });
 app.use("/media", (_req, res) => {
-  res.status(404).json({ error: "스캔 파일을 찾을 수 없습니다." });
+  res.status(404).json({ error: "Scan file not found." });
 });
 
 if (process.env.NODE_ENV === "production") {
@@ -1536,27 +1547,27 @@ app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === "LIMIT_FILE_SIZE") {
       if (error.field === "videos") {
-        res.status(413).json({ error: "촬영 영상 한 개는 최대 512MB, 전체 영상은 최대 512MB까지 올릴 수 있어요." });
+        res.status(413).json({ error: "Each capture video is limited to 512 MB; total uploads are also limited to 512 MB." });
         return;
       }
-      res.status(413).json({ error: "사진 한 장의 크기는 20MB 이하여야 해요." });
+      res.status(413).json({ error: "Each image must be 20 MB or smaller." });
       return;
     }
     if (error.code === "LIMIT_FILE_COUNT") {
       if (error.field === "videos") {
-        res.status(413).json({ error: `촬영 영상은 최대 ${requiredVideoStages.length}개까지 올릴 수 있어요.` });
+        res.status(413).json({ error: `You can upload at most ${requiredVideoStages.length} capture videos.` });
         return;
       }
-      res.status(413).json({ error: `사진은 최대 ${maxImageCount}장까지 한 번에 올릴 수 있어요.` });
+      res.status(413).json({ error: `You can upload at most ${maxImageCount} images at a time.` });
       return;
     }
   }
   if (isServerError(error)) {
-    res.status(500).json({ error: "서버 작업을 완료하지 못했어요. 서버 오류를 확인해 주세요." });
+    res.status(500).json({ error: "The server could not complete the request. Check the server error log." });
     return;
   }
   res.status(400).json({
-    error: error instanceof Error ? error.message : "요청 처리 중 알 수 없는 오류가 발생했어요.",
+    error: error instanceof Error ? error.message : "An unknown error occurred while processing the request.",
   });
 });
 

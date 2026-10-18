@@ -230,9 +230,15 @@ the project does not create cloud resources or incur charges until those steps.
    Changes can be saved while reconstruction runs.
 2. On a secure origin, the seller grants camera and device-orientation access,
    then taps the product in the live preview. MediaPipe Interactive Segmenter
-   runs in the browser and provides product framing guidance; its WASM and
-   model are downloaded from jsDelivr and Google Storage. The video frames
-   themselves are not sent to those model hosts.
+   runs in the browser and provides product framing guidance. It starts loading
+   only after the seller taps the item; the UI reports model-download progress
+   and offers a retry if loading fails. The MagicTouch task model is about
+   30.5 MB, in addition to the MediaPipe WASM runtime, so the first download
+   can take time on a mobile connection. This is Google's recommended
+   interactive segmentation model, designed for point-based item selection;
+   replacing it with a person-only model would not segment arbitrary products.
+   The WASM and model are downloaded from jsDelivr and Google Storage. Camera
+   frames themselves are not sent to those model hosts.
 3. The seller follows the on-screen aim point and turn direction through two
    180-degree heading sectors, turning or lifting the item as needed. The
    browser samples orientation, checks framing and brightness, and attempts to

@@ -85,7 +85,7 @@ export default function Viewer({ src }) {
       },
       undefined,
       () => {
-        if (alive) setError("3D 모델을 불러오지 못했어요. 다시 시도해 주세요.");
+        if (alive) setError("Could not load the 3D model. Please try again.");
       },
     );
 
@@ -118,7 +118,7 @@ export default function Viewer({ src }) {
 
   return (
     <div className="model-viewer" ref={hostRef}>
-      {!error && <span className="viewer-hint">드래그해서 회전 · 스크롤해서 확대</span>}
+      {!error && <span className="viewer-hint">Drag to rotate · scroll to zoom</span>}
       {error && <p className="viewer-error">{error}</p>}
     </div>
   );

@@ -32,46 +32,46 @@ export function measureForegroundMask(values, width, height, threshold = 0.55) {
 }
 
 export function getFramingGuidance(bounds) {
-  if (!bounds) return "상품을 화면 가운데에서 다시 선택해 주세요.";
+  if (!bounds) return "Tap the item again near the center of the screen.";
   if (
     bounds.left < 0.025 ||
     bounds.top < 0.025 ||
     bounds.right > 0.975 ||
     bounds.bottom > 0.975
   ) {
-    return "상품 가장자리가 잘리지 않도록 조금 멀리 이동해 주세요.";
+    return "Move back slightly so the entire item stays in frame.";
   }
   const width = bounds.right - bounds.left;
   const height = bounds.bottom - bounds.top;
-  if (Math.max(width, height) < 0.28) return "상품에 더 가까이 다가가 주세요.";
-  if (Math.max(width, height) > 0.78) return "상품 전체가 보이도록 조금 멀리 이동해 주세요.";
+  if (Math.max(width, height) < 0.28) return "Move closer to the item.";
+  if (Math.max(width, height) > 0.78) return "Move back slightly so the whole item is visible.";
   const centerX = (bounds.left + bounds.right) / 2;
   const centerY = (bounds.top + bounds.bottom) / 2;
   if (centerX < 0.25 || centerX > 0.75 || centerY < 0.2 || centerY > 0.8) {
-    return "상품을 화면 가운데에 놓아 주세요.";
+    return "Keep the item centered in the frame.";
   }
-  return "좋아요. 초점을 유지한 채 이 면을 천천히 촬영하세요.";
+  return "Good. Keep it in focus and slowly capture this side.";
 }
 
 export function getDetailCaptureGuidance(bounds) {
-  if (!bounds) return "상품을 화면 중앙에서 다시 선택하세요.";
+  if (!bounds) return "Tap the item again near the center of the screen.";
   if (
     bounds.left < 0.025 ||
     bounds.top < 0.025 ||
     bounds.right > 0.975 ||
     bounds.bottom > 0.975
   ) {
-    return "상품이 잘리지 않도록 카메라를 조금 멀리하세요.";
+    return "Move back slightly so the item is not cut off.";
   }
   const extent = Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top);
-  if (extent < 0.55) return "결함이 기록되도록 상품에 더 가까이 다가가세요.";
-  if (extent > 0.88) return "상품 가장자리가 잘리지 않도록 조금 멀리하세요.";
+  if (extent < 0.55) return "Move closer to capture surface details.";
+  if (extent > 0.88) return "Move back slightly so the item's edges stay visible.";
   const centerX = (bounds.left + bounds.right) / 2;
   const centerY = (bounds.top + bounds.bottom) / 2;
   if (centerX < 0.3 || centerX > 0.7 || centerY < 0.25 || centerY > 0.75) {
-    return "상품을 화면 중앙에 맞춰 주세요.";
+    return "Keep the item centered in the frame.";
   }
-  return "좋아요. 초점을 유지하고 물건을 천천히 돌려 모든 면을 가까이 촬영하세요.";
+  return "Good. Keep it in focus and slowly rotate the item to capture every side up close.";
 }
 
 export function hasDetailCaptureFraming(bounds) {
@@ -151,7 +151,7 @@ export function getAdaptiveScanGuidance({
 }) {
   if (!bounds) {
     return {
-      message: "화면에서 상품을 다시 선택하세요.",
+      message: "Tap the item again in the camera view.",
       aimPoint: null,
       progress: 0,
       targetDirection: null,
@@ -170,15 +170,15 @@ export function getAdaptiveScanGuidance({
   const directions = [];
 
   if (bounds.left < 0.03 || bounds.right > 0.97 || bounds.top < 0.03 || bounds.bottom > 0.97) {
-    directions.push("조금 멀어지세요");
+    directions.push("Move back slightly");
   } else if (Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) < 0.25) {
-    directions.push("조금 가까이 오세요");
+    directions.push("Move closer");
   }
 
-  if (centerX < 0.35) directions.push("화면 왼쪽으로");
-  else if (centerX > 0.65) directions.push("화면 오른쪽으로");
-  if (centerY < 0.35) directions.push("화면 위쪽으로");
-  else if (centerY > 0.65) directions.push("화면 아래쪽으로");
+  if (centerX < 0.35) directions.push("Move left in the frame");
+  else if (centerX > 0.65) directions.push("Move right in the frame");
+  if (centerY < 0.35) directions.push("Move toward the top of the frame");
+  else if (centerY > 0.65) directions.push("Move toward the bottom of the frame");
 
   let targetDirection = null;
   if (!complete && coverage.length === 24 && Number.isFinite(heading) && Number.isFinite(startingHeading)) {
@@ -193,22 +193,22 @@ export function getAdaptiveScanGuidance({
       .sort((left, right) => left.distance - right.distance);
     if (targetBins.length > 0) {
       const { difference } = targetBins[0];
-      targetDirection = difference > 3 ? "오른쪽" : difference < -3 ? "왼쪽" : "직진";
+      targetDirection = difference > 3 ? "right" : difference < -3 ? "left" : "straight";
     }
   }
 
   if (complete) {
-    directions.push(sectorIndex === 0 ? "두 번째 경로로 전환하세요" : "이동 경로를 완료했습니다");
+    directions.push(sectorIndex === 0 ? "Start the second route" : "Capture route complete");
   } else if (targetDirection) {
-    directions.push(targetDirection === "직진" ? "다음 표식까지 그대로 이동하세요" : `${targetDirection}으로 회전하세요`);
+    directions.push(targetDirection === "straight" ? "Continue to the next marker" : `Turn ${targetDirection}`);
   }
 
   if (previousBounds && Math.abs(centerX - ((previousBounds.left + previousBounds.right) / 2)) > 0.08) {
-    directions.push("화면 중앙 표식에 다시 맞추세요");
+    directions.push("Align the item with the center marker again");
   }
 
   return {
-    message: directions.length > 0 ? directions.join(" · ") : "화면 중앙 표식에 맞춘 채 표시된 방향으로 이동하세요.",
+    message: directions.length > 0 ? directions.join(" · ") : "Keep the item aligned with the center marker and follow the direction shown.",
     aimPoint: { x: centerX, y: centerY },
     progress,
     targetDirection,
