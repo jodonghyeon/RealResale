@@ -48,10 +48,11 @@ self.addEventListener("message", async (event) => {
         }
         modelBuffer.set(value, receivedBytes);
         receivedBytes += value.byteLength;
+        const downloadComplete = receivedBytes === totalBytes;
         self.postMessage({
           type: "loading",
-          stage: "download",
-          progress: Math.min(99, Math.round((receivedBytes / totalBytes) * 100)),
+          stage: downloadComplete ? "verify" : "download",
+          progress: downloadComplete ? 100 : Math.min(99, Math.round((receivedBytes / totalBytes) * 100)),
         });
       }
       if (receivedBytes !== totalBytes) {

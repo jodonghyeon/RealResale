@@ -197,9 +197,10 @@ function App() {
   const [segmenterReady, setSegmenterReady] = useState(false);
   const [objectSelection, setObjectSelection] = useState(null);
   const [objectBounds, setObjectBounds] = useState(null);
-  const [targetDirection, setTargetDirection] = useState("straight");
+  const [targetDirection, setTargetDirection] = useState(null);
   const [cameraGuide, setCameraGuide] = useState("Open the live camera, then tap the item you want to sell.");
   const [segmenterLoadProgress, setSegmenterLoadProgress] = useState(null);
+  const [segmenterLoadStage, setSegmenterLoadStage] = useState(null);
   const [segmenterLoadError, setSegmenterLoadError] = useState("");
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -291,16 +292,23 @@ function App() {
     segmenterInitializationStarted.current = false;
     worker.addEventListener("message", (event) => {
       if (event.data.type === "loading") {
+        setSegmenterLoadStage(event.data.stage);
         setSegmenterLoadProgress(event.data.stage === "download" ? event.data.progress : null);
+        if (event.data.stage === "verify" || event.data.stage === "initializing") {
+          setSegmenterLoadProgress(100);
+        }
         setSegmenterLoadError("");
         setCameraGuide(event.data.stage === "runtime"
           ? "Preparing the on-device vision runtime…"
           : event.data.stage === "download"
             ? `Downloading the item selection model… ${event.data.progress}% of about 30 MB`
-            : "Preparing the downloaded item selection model…");
+            : event.data.stage === "verify"
+              ? "Download reached 100%. Verifying the item selection model…"
+              : "Download verified. Initializing the item selection model…");
       } else if (event.data.type === "ready") {
         setSegmenterReady(true);
-        setSegmenterLoadProgress(100);
+        setSegmenterLoadProgress(null);
+        setSegmenterLoadStage("ready");
         setSegmenterLoadError("");
         setCameraGuide("Item selected. Keep it centered and follow the camera guide.");
       } else if (event.data.type === "result") {
@@ -405,7 +413,7 @@ function App() {
               sectorIndex: activeSectorIndexRef.current,
               coverage: sectorCoverageRef.current,
             });
-            setTargetDirection(guidance.targetDirection || "straight");
+            setTargetDirection(guidance.targetDirection);
             if (!cameraReady) {
               setCameraGuide("Align the item with the center marker, then start recording the route.");
             } else if (
@@ -429,6 +437,7 @@ function App() {
         }
       } else if (event.data.type === "error") {
         segmentationBusy.current = false;
+        setSegmenterLoadStage("error");
         setSegmenterLoadError(event.data.message);
         setSegmenterLoadProgress(null);
         setCameraGuide(`Item selection model error: ${event.data.message}`);
@@ -436,6 +445,7 @@ function App() {
     });
     worker.addEventListener("error", (event) => {
       segmentationBusy.current = false;
+      setSegmenterLoadStage("error");
       setSegmenterLoadError(event.message);
       setSegmenterLoadProgress(null);
       setCameraGuide(`Could not start the on-device item selector: ${event.message}`);
@@ -448,9 +458,11 @@ function App() {
       selectionRef.current = null;
       previousBoundsRef.current = null;
       setSegmenterReady(false);
+      setSegmenterLoadProgress(null);
+      setSegmenterLoadStage(null);
       setObjectBounds(null);
       setObjectSelection(null);
-      setTargetDirection("straight");
+      setTargetDirection(null);
     };
   }, [cameraReady, showCamera]);
 
@@ -1312,8 +1324,8 @@ function App() {
                       })}
                     </div>
                     <div className="current-pass-tip"><strong>{activeCaptureStage?.label || "Required capture complete"}</strong><span>{cameraGuide}</span></div>
-                    {segmenterLoadProgress !== null && <div className="model-download-progress" role="status"><span>On-device item selector: {segmenterLoadProgress}% · about 30 MB on first use</span><span className="counter-track"><i style={{ width: `${segmenterLoadProgress}%` }} /></span></div>}
-                    {segmenterLoadError && <button type="button" className="button button-outline" onClick={() => { setSegmenterLoadError(""); setSegmenterLoadProgress(0); segmenterInitializationStarted.current = true; workerRef.current?.postMessage({ type: "initialize" }); }}>Retry item selector download</button>}
+                    {(segmenterLoadProgress !== null || segmenterLoadStage === "runtime") && <div className="model-download-progress" role="status"><span>{segmenterLoadStage === "runtime" ? "Preparing the on-device vision runtime…" : segmenterLoadStage === "download" ? `Downloading the item selection model… ${segmenterLoadProgress}% of about 30 MB` : segmenterLoadStage === "verify" ? "Download reached 100%. Verifying the model…" : "Download verified. Initializing the model…"}</span>{segmenterLoadProgress !== null && <span className="counter-track"><i style={{ width: `${segmenterLoadProgress}%` }} /></span>}</div>}
+                    {segmenterLoadError && <button type="button" className="button button-outline" onClick={() => { setSegmenterLoadError(""); setSegmenterLoadStage("runtime"); setSegmenterLoadProgress(null); segmenterInitializationStarted.current = true; workerRef.current?.postMessage({ type: "initialize" }); }}>Retry item selector download</button>}
                     <div className="photo-counter"><span className="counter-track"><i style={{ width: `${sectorProgress}%` }} /></span><span><strong>{sectorProgress}%</strong> {activeCaptureStage?.id === "detail" ? "close-up progress" : "route coverage"}</span></div>
                     {showCamera && (
                       <div className="camera-panel">
@@ -1333,7 +1345,7 @@ function App() {
                             {!objectSelection && <span className="camera-touch-prompt">Tap the item you want to sell</span>}
                             {objectSelection && <span className="selection-point" style={{ left: `${objectSelection.x * 100}%`, top: `${objectSelection.y * 100}%` }}><span>Selected point</span></span>}
                             {objectBounds && <span className="object-outline" style={{ left: `${objectBounds.left * 100}%`, top: `${objectBounds.top * 100}%`, width: `${(objectBounds.right - objectBounds.left) * 100}%`, height: `${(objectBounds.bottom - objectBounds.top) * 100}%` }} />}
-                            <span className="direction-indicator" aria-live="polite"><strong>{targetDirection === "left" ? "←" : targetDirection === "right" ? "→" : "↑"}</strong> Move camera {targetDirection}</span>
+                            {objectBounds && targetDirection && <span className="direction-indicator" aria-live="polite"><strong>{targetDirection === "left" ? "←" : targetDirection === "right" ? "→" : "↑"}</strong> Move camera {targetDirection}</span>}
                             <span className={`camera-guide ${objectBounds ? "detected" : ""}`}>{cameraGuide}</span>
                           </div>
                         </div>
