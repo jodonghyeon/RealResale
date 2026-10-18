@@ -1,0 +1,21 @@
+{
+  "name": "RealResale - 3D 중고 거래",
+  "short_name": "RealResale",
+  "description": "상품의 모든 면과 결함을 촬영해 컬러 3D로 확인하는 중고 거래",
+  "lang": "ko-KR",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#f8f8f4",
+  "theme_color": "#f8f8f4",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
