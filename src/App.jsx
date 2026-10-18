@@ -287,7 +287,7 @@ function App() {
 
   useEffect(() => {
     if (!showCamera) return undefined;
-    const worker = new Worker(new URL("./segmenter.worker.js", import.meta.url), { type: "module" });
+    const worker = new Worker(new URL("./segmenter.worker.js", import.meta.url));
     workerRef.current = worker;
     segmenterInitializationStarted.current = false;
     worker.addEventListener("message", (event) => {
