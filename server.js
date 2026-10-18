@@ -576,7 +576,6 @@ async function extractSingleVideoFrames(scanId, directory, video) {
   if (!Number.isFinite(duration) || duration <= 0 || duration > maxVideoSeconds) {
     throw new Error(`The scan video must be no longer than ${maxVideoSeconds} seconds.`);
   }
-  const candidatesLimit = Math.max(1, Math.ceil(duration * 5));
   await runFfmpeg(
     [
       "-hide_banner",
@@ -585,11 +584,9 @@ async function extractSingleVideoFrames(scanId, directory, video) {
       "-i",
       sourcePath,
       "-vf",
-      `fps=${Math.min(5, candidatesLimit / duration).toFixed(5)},scale=3840:3840:force_original_aspect_ratio=decrease`,
-      "-frames:v",
-      String(candidatesLimit),
+      "scale=960:960:force_original_aspect_ratio=decrease",
       "-q:v",
-      "2",
+      "5",
       path.join(candidateDirectory, "%04d.jpg"),
       "-y",
     ],
@@ -623,12 +620,30 @@ async function extractSingleVideoFrames(scanId, directory, video) {
   if (selected.length === 0) {
     throw new Error("Could not extract readable frames from the scan video.");
   }
-  const imageNames = [];
-  for (const [index, frame] of selected.entries()) {
-    const name = `${String(index + 1).padStart(3, "0")}.jpg`;
-    await fs.copyFile(path.join(candidateDirectory, frame.filename), path.join(directory, name));
-    imageNames.push(name);
-  }
+  const imageNames = selected.map((_, index) => `${String(index + 1).padStart(3, "0")}.jpg`);
+  const selectedFrames = selected
+    .map((frame) => `eq(n,${Number(path.parse(frame.filename).name) - 1})`)
+    .join("+");
+  await runFfmpeg(
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      sourcePath,
+      "-vf",
+      `select='${selectedFrames}',scale=3840:3840:force_original_aspect_ratio=decrease`,
+      "-vsync",
+      "0",
+      "-frames:v",
+      String(selected.length),
+      "-q:v",
+      "2",
+      path.join(directory, "%03d.jpg"),
+      "-y",
+    ],
+    "Extracting selected full-resolution video frames",
+  );
   await fs.rm(candidateDirectory, { recursive: true, force: true });
   db.prepare("UPDATE scans SET image_count = ?, images_json = ? WHERE id = ?").run(
     imageNames.length,
