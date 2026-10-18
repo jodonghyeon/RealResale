@@ -962,14 +962,6 @@ app.post("/api/scans", requireAuth, (req, res, next) => {
       res.status(503).json({ error: "현재 재구성 작업이 가득 찼어요. 잠시 후 다시 시도해 주세요." });
       return;
     }
-    if (!reconstructionAvailable) {
-      await cleanupUploads(files);
-      res.status(503).json({
-        error: "서버에서 COLMAP 또는 CUDA GPU를 찾을 수 없어요. CUDA를 지원하는 COLMAP과 NVIDIA GPU를 설정하고 서버를 다시 시작해 주세요.",
-      });
-      return;
-    }
-
     const scanId = crypto.randomUUID();
     const directory = path.join(scanDir, scanId);
     const imageFormats = [];
@@ -994,6 +986,14 @@ app.post("/api/scans", requireAuth, (req, res, next) => {
                 : `사진 ${index + 1}장을 읽을 수 없어요. JPEG, PNG, WebP 또는 AVIF 원본을 확인해 주세요.`,
           );
         }
+      }
+
+      if (!reconstructionAvailable) {
+        await cleanupUploads(files);
+        res.status(503).json({
+          error: "서버에서 COLMAP 또는 CUDA GPU를 찾을 수 없어요. CUDA를 지원하는 COLMAP과 NVIDIA GPU를 설정하고 서버를 다시 시작해 주세요.",
+        });
+        return;
       }
 
       const imageNames = imageFormats.map((format, index) => {
