@@ -1,143 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import {
-  getAdaptiveScanGuidance,
-  getDetailCaptureGuidance,
-  hasDetailCaptureFraming,
-  getRouteCoverage,
-  recordHeadingCoverage,
-  supportsDetailCaptureResolution,
-} from "./scan-guidance.js";
 
-const MIN_IMAGES = 24;
-const MAX_IMAGES = 80;
-const MAX_SCAN_BYTES = 512 * 1024 * 1024;
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-const MAX_VIDEO_SECONDS = 30;
-const CAMERA_PASS_SECONDS = 30;
-const MIN_SECTOR_COVERAGE = 9;
-const MIN_RECORDING_SECONDS = 5;
-const MIN_DETAIL_FRAMES = 20;
-const MIN_DETAIL_VIDEO_SECONDS = 20;
-const DETAIL_RECORDING_SECONDS = 20;
-const MIN_DETAIL_RESOLUTION = 3840;
-const DARKNESS_THRESHOLD = 48;
-const BRIGHTNESS_RECOVERY_THRESHOLD = 72;
 const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
-const FRAME_SAMPLE_SECONDS = 0.3;
-const MAX_VIDEO_CANDIDATES = 120;
-const MAX_FRAME_DIMENSION = 2560;
-const scanSectors = [
-  { id: "route-a", label: "Level orbit · first half" },
-  { id: "route-b", label: "Level orbit · second half" },
-];
-const captureStages = [
-  ...scanSectors,
-  { id: "detail", label: "4K close-up capture" },
-];
+const MAX_RECORDING_SECONDS = 120;
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 const displayCategory = (category) => category;
 const Viewer = lazy(() => import("./Viewer.jsx"));
-
-function seekVideo(video, time) {
-  return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      cleanup();
-      reject(new Error("Timed out while reading a video frame."));
-    }, 5000);
-    const cleanup = () => {
-      window.clearTimeout(timeout);
-      video.removeEventListener("seeked", onSeeked);
-      video.removeEventListener("error", onError);
-    };
-    const onSeeked = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = () => {
-      cleanup();
-      reject(new Error("Could not read a video frame. Try recording the route again."));
-    };
-    video.addEventListener("seeked", onSeeked, { once: true });
-    video.addEventListener("error", onError, { once: true });
-    video.currentTime = time;
-  });
-}
-
-function canvasToBlob(canvas, type, quality) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error("Could not save the video frame as an image."))),
-      type,
-      quality,
-    );
-  });
-}
-
-function analyzeFrame(video, analysisWidth = 320) {
-  const width = analysisWidth;
-  const height = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * width));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) throw new Error("This browser cannot analyze video frames.");
-  context.drawImage(video, 0, 0, width, height);
-  const { data } = context.getImageData(0, 0, width, height);
-  const gray = new Float32Array(width * height);
-  for (let pixel = 0, offset = 0; pixel < gray.length; pixel += 1, offset += 4) {
-    gray[pixel] = data[offset] * 0.299 + data[offset + 1] * 0.587 + data[offset + 2] * 0.114;
-  }
-
-  let sum = 0;
-  let sumSquares = 0;
-  let count = 0;
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      const pixel = y * width + x;
-      const laplacian =
-        gray[pixel - width] +
-        gray[pixel - 1] +
-        gray[pixel + 1] +
-        gray[pixel + width] -
-        4 * gray[pixel];
-      sum += laplacian;
-      sumSquares += laplacian * laplacian;
-      count += 1;
-    }
-  }
-
-  const signature = [];
-  for (let y = 0; y < 24; y += 1) {
-    for (let x = 0; x < 32; x += 1) {
-      const left = Math.floor((x * width) / 32);
-      const top = Math.floor((y * height) / 24);
-      const right = Math.max(left + 1, Math.floor(((x + 1) * width) / 32));
-      const bottom = Math.max(top + 1, Math.floor(((y + 1) * height) / 24));
-      let total = 0;
-      let samples = 0;
-      for (let sampleY = top; sampleY < Math.min(bottom, height); sampleY += 1) {
-        for (let sampleX = left; sampleX < Math.min(right, width); sampleX += 1) {
-          total += gray[sampleY * width + sampleX];
-          samples += 1;
-        }
-      }
-      signature.push(total / samples);
-    }
-  }
-
-  return {
-    sharpness: Math.max(0, sumSquares / count - (sum / count) ** 2),
-    signature,
-  };
-}
-
-function signaturesAreSimilar(left, right) {
-  let difference = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    difference += Math.abs(left[index] - right[index]);
-  }
-  return difference / left.length < 3.5;
-}
 
 function ModelPreview({ src }) {
   return (
@@ -238,25 +105,13 @@ function App() {
   }, [frames]);
 
   const files = frames.map((frame) => frame.file);
-  const activeCaptureStage = captureStages[activeSectorIndex] || null;
-  const completedCaptureStageCount = new Set(videoClips.map((clip) => clip.sector)).size;
   const cameraSettings = streamRef.current?.getVideoTracks()[0]?.getSettings?.();
-  const detailCaptureReady = activeCaptureStage?.id !== "detail" || (
-    supportsDetailCaptureResolution(cameraSettings?.width, cameraSettings?.height) &&
-    hasDetailCaptureFraming(objectBounds)
-  );
 
   const clearFrames = () => {
     framesRef.current = [];
     setFrames([]);
     videoClipsRef.current = [];
     setVideoClips([]);
-    setActiveSectorIndex(0);
-    activeSectorIndexRef.current = 0;
-    sectorCoverageRef.current = Array(24).fill(false);
-    startingHeadingRef.current = null;
-    routeVideoPartsRef.current = { "route-a": [], "route-b": [] };
-    setSectorProgress(0);
     setBrightness(null);
     setFrameReport("");
   };
@@ -290,7 +145,7 @@ function App() {
   }, [showCamera]);
 
   useEffect(() => {
-    if (!showCamera) return undefined;
+    if (!showCamera || !selectionRef.current) return undefined;
     const worker = new Worker(new URL("./segmenter.worker.js", import.meta.url));
     workerRef.current = worker;
     segmenterInitializationStarted.current = false;
@@ -748,6 +603,23 @@ function App() {
     setDescription(resumable?.description || "");
   };
 
+  const storeScanVideo = (clip) => {
+    if (clip.size === 0) {
+      setFormError("The recorded video is empty.");
+      return;
+    }
+    if (clip.size > MAX_VIDEO_BYTES) {
+      setFormError("The scan video exceeds 512 MB.");
+      return;
+    }
+    const extension = clip.type.includes("mp4") ? "mp4" : "webm";
+    const file = new File([clip], `scan.${extension}`, { type: clip.type || "video/webm" });
+    const saved = [{ sector: "scan", file }];
+    videoClipsRef.current = saved;
+    setVideoClips(saved);
+    setFrameReport("Video ready for server-side frame selection and 3D reconstruction.");
+  };
+
   const processVideoClip = async (clip, sectorId) => {
     const clips = Array.isArray(clip) ? clip : [clip];
     const detailPass = sectorId === "detail";
@@ -951,6 +823,73 @@ function App() {
     setCameraError("");
     try {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Live capture requires a trusted HTTPS address.");
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 3840 },
+          height: { ideal: 2160 },
+        },
+      });
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = stream;
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        if (streamRef.current !== stream) return;
+        streamRef.current = null;
+        setCameraReady(false);
+        setCameraError("Camera connection ended.");
+      }, { once: true });
+      setCameraReady(true);
+      setShowCamera(true);
+      if (videoRef.current) videoRef.current.srcObject = stream;
+    } catch (error) {
+      setCameraError(error instanceof Error ? error.message : "Could not access the camera.");
+    }
+  };
+
+  const startRecording = () => {
+    if (recorderRef.current?.state === "recording") {
+      stopRecording();
+      return;
+    }
+    const stream = streamRef.current;
+    if (!stream || typeof MediaRecorder === "undefined") {
+      setCameraError("Camera recording is unavailable in this browser.");
+      return;
+    }
+    try {
+      const mimeType = ["video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
+        .find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      recordingChunks.current = [];
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data.size > 0) recordingChunks.current.push(event.data);
+      });
+      recorder.addEventListener("stop", () => {
+        const clip = new Blob(recordingChunks.current, { type: recorder.mimeType || "video/webm" });
+        recordingChunks.current = [];
+        recorderRef.current = null;
+        setRecording(false);
+        storeScanVideo(clip);
+      }, { once: true });
+      recorder.start(1000);
+      recorderRef.current = recorder;
+      setCameraError("");
+      setRecording(true);
+      recordingTimeout.current = window.setTimeout(() => {
+        if (recorder.state === "recording") recorder.stop();
+      }, MAX_RECORDING_SECONDS * 1000);
+    } catch (error) {
+      setCameraError(error instanceof Error ? error.message : "Could not start video recording.");
+    }
+  };
+
+  const legacyStartCamera = async () => {
+    setCameraError("");
+    try {
+      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
         throw new Error("Live capture requires an HTTPS address trusted by this device.");
       }
       if (!("DeviceOrientationEvent" in window)) {
@@ -1009,7 +948,7 @@ function App() {
     }
   };
 
-  const startRecording = () => {
+  const legacyStartRecording = () => {
     const stream = streamRef.current;
     if (!stream || typeof MediaRecorder === "undefined" || !orientationRef.current) {
       setCameraError("The orientation sensor and live video recording are not ready.");
@@ -1096,7 +1035,7 @@ function App() {
       setRecording(true);
       recordingTimeout.current = window.setTimeout(() => {
         if (recorder.state === "recording") recorder.stop();
-      }, (detailPass ? DETAIL_RECORDING_SECONDS : CAMERA_PASS_SECONDS) * 1000);
+      }, MAX_RECORDING_SECONDS * 1000);
     } catch (error) {
       setCameraError(error instanceof Error ? error.message : "Could not start video recording.");
     }
@@ -1139,23 +1078,18 @@ function App() {
     event.preventDefault();
     setFormError("");
     setMessage("");
-    if (activeSectorIndexRef.current < captureStages.length || new Set(videoClipsRef.current.map((clip) => clip.sector)).size !== captureStages.length) {
-      setFormError("Complete both full-item routes and the required 4K close-up before starting the scan.");
-      return;
-    }
     if (!title.trim() || !price || !Number.isSafeInteger(Number(price)) || Number(price) < 0) {
       setFormError("Enter an item title and price before starting the capture.");
       return;
     }
-    if (files.length < MIN_IMAGES) {
-      setFormError(`At least ${MIN_IMAGES} multi-angle images are required. You currently have ${files.length}.`);
+    const scanVideo = videoClipsRef.current[0]?.file;
+    if (!scanVideo) {
+      setFormError("Record a scan video before starting 3D reconstruction.");
       return;
     }
     setBusy(true);
     const form = new FormData();
-    videoClipsRef.current.forEach(({ sector, file }) => {
-      form.append("videos", file, file.name);
-    });
+    form.append("videos", scanVideo, scanVideo.name);
     form.append("title", title.trim());
     form.append("description", description);
     form.append("category", category);
@@ -1164,7 +1098,7 @@ function App() {
       const result = await request("/api/scans/videos", { method: "POST", body: form });
       setDraft(result.scan);
       notified.current.delete(result.scan.id);
-      setMessage("Full-item and 4K close-up videos saved. The server will validate reconstruction frames and surface-detail images.");
+      setMessage("Scan video sent to the GPU server for frame selection and 3D reconstruction.");
       refresh().catch(() => {});
     } catch (error) {
       setFormError(error.message);
@@ -1330,8 +1264,8 @@ function App() {
 
             <section className="trust-strip">
               <span className="trust-seal">R</span>
-              <p>Sellers complete two full-item routes and a 4K close-up. <strong>Buyers can inspect the 3D model, high-resolution surface images, and original videos, then message the seller privately.</strong></p>
-              <button onClick={openScanner}>View the capture guide <span>↗</span></button>
+              <p>Sellers submit one scan video for server-side frame selection and GPU reconstruction. <strong>Buyers can inspect the 3D model and original video, then message the seller privately.</strong></p>
+              <button onClick={openScanner}>Create a scan <span>↗</span></button>
             </section>
           </>
         )}
@@ -1347,7 +1281,7 @@ function App() {
             <div className="scan-layout">
               <div className="scan-main">
                 <section className="scan-card-panel seller-details">
-                  <div className="panel-heading"><span className="step-number">01</span><div><h2>Enter item details first</h2><p>Add details before reconstruction; you can edit them while it runs.</p></div></div>
+                  <div className="panel-heading"><span className="step-number">01</span><div><h2>Listing details</h2><p>These details appear with the reconstructed model and original video.</p></div></div>
                   <label>Item title<input required maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="e.g. Mirrorless camera in good condition" /></label>
                   <div className="input-row"><label>Price (USD)<input required type="number" min="0" max="1000000000" step="1" value={price} onChange={(event) => setPrice(event.target.value)} placeholder="300" /></label><label>Category<select value={category} onChange={(event) => setCategory(event.target.value)}><option>Electronics & cameras</option><option>Fashion & clothing</option><option>Furniture & home</option><option>Home & hobbies</option><option>Other</option></select></label></div>
                   <label>Item description<textarea maxLength={2000} rows="4" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Include how long it was used, repair history, and any scratches or damage you have found." /></label>
@@ -1355,69 +1289,31 @@ function App() {
                 </section>
                 {!draft ? (
                   <form className="scan-card-panel" onSubmit={startScan}>
-                    <div className="panel-heading"><span className="step-number">02</span><div><h2>Full-item and 4K close-up capture</h2><p>The two route stages are the first and second halves of one level orbit, moving in the same direction. Interrupted route footage is saved so you can continue later.</p></div><span className="step-status">{completedCaptureStageCount}/{captureStages.length} stages captured</span></div>
-                    <div className="capture-tips">
-                      <span className="tip-icon">✳</span>
-                      <div><strong>After the full-item routes, move close and capture every side in 4K.</strong><p>For the final stage, keep the camera close and slowly rotate or turn the item over to capture its entire surface. At least {MIN_DETAIL_FRAMES} sharp frames are required from the 4K original. Listings are blocked if the check fails. This capture target is intended to help record 0.5 mm defects; it does not guarantee they will be visible.</p></div>
-                    </div>
-                    <div className="surface-pass-list" aria-label="Full-surface routes and close-up capture stages">
-                      {captureStages.map((sector, index) => {
-                        const complete = videoClips.some((clip) => clip.sector === sector.id);
-                        const active = activeSectorIndex === index && !complete;
-                        return <div key={sector.id} className={`surface-pass ${active ? "active" : ""} ${complete ? "complete" : ""}`} aria-current={active ? "step" : undefined}><span>{complete ? "✓" : String(index + 1).padStart(2, "0")}</span>{sector.label}</div>;
-                      })}
-                    </div>
-                    <div className="current-pass-tip"><strong>{activeCaptureStage?.label || "Required capture complete"}</strong><span>{cameraGuide}</span></div>
-                    {(segmenterLoadProgress !== null || segmenterLoadStage === "runtime") && <div className="model-download-progress" role="status"><span>{segmenterLoadStage === "runtime" ? "Preparing the on-device vision runtime…" : segmenterLoadStage === "download" ? `Downloading the item selection model… ${segmenterLoadProgress}% of about 30 MB` : segmenterLoadStage === "verify" ? "Download reached 100%. Verifying the model…" : "Download verified. Initializing the model…"}</span>{segmenterLoadProgress !== null && <span className="counter-track"><i style={{ width: `${segmenterLoadProgress}%` }} /></span>}</div>}
-                    {segmenterLoadError && <button type="button" className="button button-outline" onClick={() => { setSegmenterLoadError(""); setSegmenterLoadStage("runtime"); setSegmenterLoadProgress(null); segmenterInitializationStarted.current = true; workerRef.current?.postMessage({ type: "initialize" }); }}>Retry item selector download</button>}
-                    <div className="photo-counter"><span className="counter-track"><i style={{ width: `${sectorProgress}%` }} /></span><span><strong>{sectorProgress}%</strong> {activeCaptureStage?.id === "detail" ? "close-up progress" : "route coverage"}</span></div>
+                    <div className="panel-heading"><span className="step-number">02</span><div><h2>Scan video</h2><p>Record one video. The server selects frames and reconstructs the 3D model.</p></div></div>
                     {showCamera && (
                       <div className="camera-panel">
                         <div className="camera-viewport">
                           <video ref={videoRef} autoPlay playsInline muted onLoadedMetadata={(event) => event.currentTarget.play().catch(() => {})} />
-                          <div className="camera-selection-layer" onClick={selectProductInPreview} onKeyDown={(event) => {
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault();
-                              const bounds = event.currentTarget.getBoundingClientRect();
-                              selectProductInPreview({
-                                currentTarget: event.currentTarget,
-                                clientX: bounds.left + bounds.width / 2,
-                                clientY: bounds.top + bounds.height / 2,
-                              });
-                            }
-                          }} role="button" tabIndex={0} aria-label="Tap the item you want to sell so it can be separated from the background">
-                            {!objectSelection && <span className="camera-touch-prompt">Tap the item you want to sell</span>}
-                            {objectSelection && <span className="selection-point" style={{ left: `${objectSelection.x * 100}%`, top: `${objectSelection.y * 100}%` }}><span>Selected point</span></span>}
-                            {objectBounds && <span className="object-outline" style={{ left: `${objectBounds.left * 100}%`, top: `${objectBounds.top * 100}%`, width: `${(objectBounds.right - objectBounds.left) * 100}%`, height: `${(objectBounds.bottom - objectBounds.top) * 100}%` }} />}
-                            <span className={`camera-guide ${objectBounds ? "detected" : ""}`}>{cameraGuide}</span>
-                          </div>
                         </div>
                         <div className="camera-controls">
-                          <button type="button" className="button button-outline" disabled={processingVideo || recording || !segmenterReady || !objectBounds || !orientationReady || brightness === null || brightness < DARKNESS_THRESHOLD || !activeCaptureStage || !detailCaptureReady} onClick={startRecording}>● {recording ? "Recording…" : activeCaptureStage?.id === "detail" ? "Start 4K close-up capture" : "Start route recording"}</button>
+                          <button type="button" className="button button-outline" disabled={busy} onClick={startRecording}>● {recording ? "Stop and use video" : videoClips.length ? "Record again" : "Start recording"}</button>
                           <button type="button" className="text-button" disabled={recording} onClick={stopCamera}>Close camera</button>
                         </div>
-                        <p className="recording-indicator"><span className={torchEnabled ? "torch-on" : ""} />{recording ? `Recording · ${sectorProgress}% · ${cameraGuide}` : `Camera ${cameraSettings?.width || "?"}×${cameraSettings?.height || "?"} · Brightness ${brightness === null ? "checking" : Math.round(brightness)} · Flash ${torchSupported ? (torchEnabled ? "on" : "off") : "unsupported (bright light required)"} · Orientation ${orientationReady ? "ready" : "connecting"}`}</p>
+                        <p className="recording-indicator">{recording ? "Recording…" : cameraSettings ? `Camera ${cameraSettings.width || "?"}×${cameraSettings.height || "?"}` : ""}</p>
                       </div>
                     )}
                     {cameraError && <p className="form-error">{cameraError}</p>}
                     <div className="capture-options">
                       <button type="button" className="capture-option" onClick={startCamera}>
-                        <span className="capture-icon">◎</span><strong>{showCamera ? "Reconnect camera" : "Start guided live capture"}</strong><span>Camera and orientation access are required. The flash is enabled automatically on supported devices; otherwise, capture requires bright lighting.</span>
+                        <span className="capture-icon">◎</span><strong>{showCamera ? "Reconnect camera" : "Open camera"}</strong>
                       </button>
                     </div>
-                    <div className="photo-counter"><span className="counter-track"><i style={{ width: `${Math.min((files.length / MIN_IMAGES) * 100, 100)}%` }} /></span><span><strong>{files.length}</strong> / {MIN_IMAGES}–{MAX_IMAGES} frames for 3D reconstruction</span></div>
-                    {processingVideo && <div className="frame-processing"><span className="spinner" /> Checking videos for blur and duplicate views…</div>}
+                    {videoClips.length > 0 && <p className="frame-report">Scan video ready · {(videoClips[0].file.size / (1024 * 1024)).toFixed(1)} MB</p>}
                     {frameReport && <p className="frame-report">{frameReport}</p>}
-                    <div className="photo-grid">
-                      {frames.map((frame, index) => {
-                        const key = `${frame.file.name}:${frame.file.size}:${frame.file.lastModified}`;
-                        return <div className="photo-thumb" key={key}><img src={previews[key]} alt={`Selected scan frame ${index + 1}`} /><span>{String(index + 1).padStart(2, "0")}</span><button type="button" aria-label={`Remove frame ${index + 1}`} onClick={() => removeFrame(index)}>×</button></div>;
-                      })}
-                    </div>
-                    <div className="scan-disclosure"><span>ⓘ</span> Original route videos are sent to the server for reconstruction. Item selection and live frame analysis run on your device. Browsers do not show a separate flash permission prompt; flash support is checked through the camera.</div>
+                    <div className="scan-disclosure"><span>ⓘ</span> The original video and selected frames will be saved with the reconstructed model.</div>
                     {formError && <p className="form-error">{formError}</p>}
-                    <button className="button button-dark full-button" disabled={busy || processingVideo || recording || activeSectorIndex < captureStages.length || completedCaptureStageCount !== captureStages.length || files.length < MIN_IMAGES || !health?.reconstructionAvailable}>
-                      {busy ? "Uploading videos to the server…" : !health?.reconstructionAvailable ? "GPU reconstruction engine unavailable" : `Reconstruct 3D from ${completedCaptureStageCount} capture stages and ${files.length} frames →`}
+                    <button className="button button-dark full-button" disabled={busy || recording || !videoClips.length || !health?.reconstructionAvailable}>
+                      {busy ? "Uploading video to GPU server…" : !health?.reconstructionAvailable ? "GPU reconstruction engine unavailable" : "Reconstruct 3D from video →"}
                     </button>
                     {!health?.reconstructionAvailable && <p className="engine-warning">{health?.colmapAvailable === false ? "COLMAP was not found." : ""}{health?.cudaAvailable === false ? " An NVIDIA GPU or nvidia-smi was not found." : ""}{health?.colmapCudaAvailable === false ? " The installed COLMAP build does not support CUDA." : ""} A CUDA-enabled COLMAP build and an NVIDIA GPU are required. Check the README setup instructions, then restart the server.</p>}
                   </form>
@@ -1425,23 +1321,21 @@ function App() {
                   <div className="scan-card-panel">
                     <div className="panel-heading"><span className="step-number">02</span><div><h2>{draft.status === "ready" ? "Scan complete" : draft.status === "failed" ? "Scan failed" : "Reconstructing on server"}</h2><p>{draft.imageCount} images · {draft.id.slice(0, 8)}</p></div><span className={`scan-badge ${draft.status}`}>{draft.status === "ready" ? "RECONSTRUCTED" : draft.status.toUpperCase()}</span></div>
                     {(draft.status === "processing" || draft.status === "queued") && <div className="processing-state"><span className="spinner" /><div className="processing-details"><strong>{draft.status === "queued" ? "Your scan is queued." : "Computing the 3D surface from selected frames."}</strong><p>This may take several minutes or longer, depending on the server and number of frames. You can close the browser; progress will be saved.</p><div className="progress-heading"><span>Estimated progress by stage</span><strong>{draft.progressPercent ?? 0}%</strong></div><div className="progress-track" role="progressbar" aria-label={`3D reconstruction progress ${draft.progressPercent ?? 0}%`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={draft.progressPercent ?? 0}><span style={{ width: `${draft.progressPercent ?? 0}%` }} /></div><span className="process-stage">{draft.progress || "Waiting for server processing"}</span></div></div>}
-                    {draft.status === "failed" && <div className="failure-state"><strong>These selected video frames did not produce a publishable 3D model.</strong><p>{draft.error}</p><p>Record again in even lighting, keeping the camera in focus as you move it slowly.</p><button type="button" className="button button-outline" onClick={() => { setDraft(null); clearFrames(); setMessage(""); }}>Start a new scan</button></div>}
-                    {draft.status === "ready" && <><div className="draft-model"><ModelPreview src={modelSrc(draft)} /><span className="model-tag"><span>◉</span> High-density color 3D point cloud</span></div><div className="scan-disclosure"><span>ⓘ</span> Close-up photos are high-resolution source evidence. AI does not automatically identify every scratch or guarantee detection of 0.5 mm defects.</div>
+                    {draft.status === "failed" && <div className="failure-state"><strong>The server could not reconstruct a 3D model from this video.</strong><p>{draft.error}</p><button type="button" className="button button-outline" onClick={() => { setDraft(null); setMessage(""); }}>Retry reconstruction</button></div>}
+                    {draft.status === "ready" && <><div className="draft-model"><ModelPreview src={modelSrc(draft)} /><span className="model-tag"><span>◉</span> High-density color 3D point cloud</span></div>
                       <form className="listing-form" onSubmit={publish}>
-                        <div className="originals-strip">{draft.images.slice(0, 8).map((image, index) => <img key={image} src={`/media/scans/${draft.id}/images/${encodeURIComponent(image)}`} alt={`Original scan image ${index + 1}`} />)}<span>{draft.imageCount} original scan images for item inspection</span></div>
-                        <div className="detail-evidence"><h3>4K close-up surface photos · {draft.detailCount}</h3><p>Open at full resolution to inspect small surface marks.</p><div>{draft.details.map((frame, index) => <a key={frame.name} href={`/media/scans/${draft.id}/details/${encodeURIComponent(frame.name)}`} target="_blank" rel="noreferrer"><img src={`/media/scans/${draft.id}/details/${encodeURIComponent(frame.name)}`} alt={`Close-up surface photo ${index + 1}`} loading="lazy" /><span>{frame.width}×{frame.height}</span></a>)}</div></div>
+                        <div className="originals-strip">{draft.images.slice(0, 8).map((image, index) => <img key={image} src={`/media/scans/${draft.id}/images/${encodeURIComponent(image)}`} alt={`Server-selected scan frame ${index + 1}`} />)}<span>{draft.imageCount} sharp frames selected from your video</span></div>
                         {formError && <p className="form-error">{formError}</p>}
                         <button className="button button-dark full-button" disabled={busy}>{busy ? "Publishing…" : "Publish listing with completed 3D scan →"}</button>
                       </form>
-                      <div className="video-evidence-grid seller-video-evidence">{draft.videos.map((video) => <figure key={video.name}><figcaption>{captureStages.find((stage) => stage.id === video.stage)?.label || video.stage}{video.name.includes("-part-") ? ` · Part ${video.name.match(/-part-(\d+)/)?.[1]}` : ""}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${draft.id}/videos/${encodeURIComponent(video.name)}`} /></figure>)}</div>
+                      <div className="video-evidence-grid seller-video-evidence">{draft.videos.map((video) => <figure key={video.name}><figcaption>Original scan video</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${draft.id}/videos/${encodeURIComponent(video.name)}`} /></figure>)}</div>
                       <button type="button" className="button button-outline full-button" disabled={busy} onClick={() => { setDraft(null); clearFrames(); setTitle(""); setPrice(""); setCategory("Electronics & cameras"); setDescription(""); setMessage(""); setFormError(""); }}>Scan another item</button>
                     </>}
                   </div>
                 )}
               </div>
               <aside className="scan-sidebar">
-                <div className="sidebar-card"><div className="eyebrow">SCAN QUALITY</div><h3>One level orbit<br />split into two parts</h3><ol className="quality-list"><li><span>01</span><div><strong>Tap the item to sell</strong><p>Tap the item in the camera view to track its area on your device.</p></div></li><li><span>02</span><div><strong>Keep it centered as you orbit</strong><p>Move smoothly around the item in one direction. The first and second stages cover the two halves of the same orbit.</p></div></li><li><span>03</span><div><strong>Rotate the item up close</strong><p>Record every side slowly in 4K, keeping the item large in frame.</p></div></li><li><span>04</span><div><strong>Verify source quality</strong><p>The server checks 4K resolution and focus, then saves sharp close-up frames.</p></div></li></ol></div>
-                <div className="sidebar-note"><span>R.</span><p>0.5 mm is a capture design target, not a detection guarantee. If a defect is blurry, hidden, or missing from the source video, the model cannot reconstruct it.</p></div>
+                <div className="sidebar-card"><div className="eyebrow">RECONSTRUCTION</div><h3>One video<br />One 3D model</h3><p>The original video and the server-selected frames are included with the listing.</p></div>
               </aside>
             </div>
           </section>
@@ -1463,8 +1357,7 @@ function App() {
               {activeConversation?.listingId === selected.id && <section className="chat-panel"><h3>{activeConversation.listingTitle} · Message with {activeConversation.otherUsername}</h3><div className="chat-messages">{chatMessages.map((chat) => <p key={chat.id} className={chat.senderId === user?.id ? "chat-message mine" : "chat-message"}><strong>{chat.senderUsername}</strong>{chat.body}</p>)}</div><form className="chat-compose" onSubmit={sendMessage}><input aria-label="Message" maxLength={2000} value={messageInput} onChange={(event) => setMessageInput(event.target.value)} placeholder="Message the seller" /><button className="button button-dark" disabled={!messageInput.trim()}>Send</button></form></section>}
               <div className="originals-heading"><strong>Original capture frames</strong><span>Inspect the item and 3D result from multiple angles.</span></div>
               <div className="modal-originals">{selected.scan.images.map((image, index) => <img key={image} src={`/media/scans/${selected.scan.id}/images/${encodeURIComponent(image)}`} alt={`${selected.title} original photo ${index + 1}`} loading="lazy" />)}</div>
-              {selected.scan.details?.length > 0 && <div className="detail-evidence"><h3>4K close-up surface photos · {selected.scan.details.length}</h3><p>Open photos at full resolution to inspect them. These are not automated defect assessments.</p><div>{selected.scan.details.map((frame, index) => <a key={frame.name} href={`/media/scans/${selected.scan.id}/details/${encodeURIComponent(frame.name)}`} target="_blank" rel="noreferrer"><img src={`/media/scans/${selected.scan.id}/details/${encodeURIComponent(frame.name)}`} alt={`${selected.title} close-up surface photo ${index + 1}`} loading="lazy" /><span>{frame.width}×{frame.height}</span></a>)}</div></div>}
-              {selected.scan.videos?.length > 0 && <div className="video-evidence"><h3>Full-item routes and close-up videos</h3><div className="video-evidence-grid">{selected.scan.videos.map((video) => <figure key={video.name}><figcaption>{captureStages.find((stage) => stage.id === video.stage)?.label || video.stage}{video.name.includes("-part-") ? ` · Part ${video.name.match(/-part-(\d+)/)?.[1]}` : ""}</figcaption><video controls playsInline preload="metadata" src={`/media/scans/${selected.scan.id}/videos/${encodeURIComponent(video.name)}`} /></figure>)}</div></div>}
+              {selected.scan.videos?.length > 0 && <div className="video-evidence"><h3>Original scan video</h3><div className="video-evidence-grid">{selected.scan.videos.map((video) => <figure key={video.name}><video controls playsInline preload="metadata" src={`/media/scans/${selected.scan.id}/videos/${encodeURIComponent(video.name)}`} /></figure>)}</div></div>}
             </div>
           </article>
         </div>

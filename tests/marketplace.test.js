@@ -111,10 +111,10 @@ before(async () => {
   const health = await waitForServer();
   assert.equal(health.ok, true);
   assert.equal(health.videoProcessingAvailable, true);
-  assert.deepEqual(health.requiredCaptureSectors, ["route-a", "route-b"]);
-  assert.deepEqual(health.requiredCaptureStages, ["route-a", "route-b", "detail"]);
-  assert.equal(health.minDetailFrames, 20);
-  assert.equal(health.minDetailResolution, 3840);
+  assert.deepEqual(health.requiredCaptureSectors, []);
+  assert.deepEqual(health.requiredCaptureStages, ["scan"]);
+  assert.equal(health.maxVideoSeconds, 120);
+  assert.equal(health.maxTotalVideoSeconds, 120);
   assert.equal(typeof health.reconstructionAvailable, "boolean");
   seller = await registerUser("seller_user");
   buyer = await registerUser("buyer_user");
@@ -190,7 +190,7 @@ test("migrates scan progress and exposes its percentage through the API", async 
   }
 });
 
-test("requires both guided video routes", async () => {
+test("rejects uploads that do not contain one scan video", async () => {
   const form = new FormData();
   form.append("videos", new Blob(["not an actual video"], { type: "video/mp4" }), "route-a.mp4");
   form.append("title", "Test product");
@@ -203,25 +203,8 @@ test("requires both guided video routes", async () => {
     body: form,
   });
   assert.equal(response.status, 400);
-  assert.match((await response.json()).error, /Two route videos and one high-resolution close-up video/);
+  assert.match((await response.json()).error, /Upload one scan video/);
   assert.deepEqual((await (await fetch(`${baseUrl}/api/scans`, { headers: { cookie: seller.cookie } })).json()).scans, []);
-  assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
-
-  const missingCloseup = new FormData();
-  for (const segment of ["route-a-part-1", "route-a-part-2", "route-b-part-1", "route-b-part-2"]) {
-    missingCloseup.append("videos", new Blob(["not an actual video"], { type: "video/mp4" }), `${segment}.mp4`);
-  }
-  missingCloseup.append("title", "Test product");
-  missingCloseup.append("description", "Details");
-  missingCloseup.append("category", "Other");
-  missingCloseup.append("price", "100");
-  const missingCloseupResponse = await fetch(`${baseUrl}/api/scans/videos`, {
-    method: "POST",
-    headers: { origin: "http://127.0.0.1:5173", cookie: seller.cookie },
-    body: missingCloseup,
-  });
-  assert.equal(missingCloseupResponse.status, 400);
-  assert.match((await missingCloseupResponse.json()).error, /high-resolution close-up video/);
   assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
 });
 
@@ -361,25 +344,12 @@ test("validates uploaded frames before queuing reconstruction", async () => {
   assert.deepEqual(await fs.promises.readdir(path.join(tempDir, "data", "incoming")), []);
 });
 
-test("requires both route videos and 20 high-resolution detail frames for listings", async () => {
+test("publishes one reconstructed scan video with its model and original video", async () => {
   const legacyScanId = crypto.randomUUID();
-  const incompleteScanId = crypto.randomUUID();
   const videoScanId = crypto.randomUUID();
-  const stages = ["route-a", "route-a", "route-b", "detail"];
-  const videos = [
-    { stage: "route-a", name: "route-a-part-1.mp4" },
-    { stage: "route-a", name: "route-a-part-2.mp4" },
-    { stage: "route-b", name: "route-b.mp4" },
-    { stage: "detail", name: "detail.mp4" },
-  ];
-  const detailFrames = Array.from({ length: 20 }, (_, index) => ({
-    name: `${String(index + 1).padStart(3, "0")}.jpg`,
-    width: 3840,
-    height: 2160,
-  }));
+  const videos = [{ stage: "scan", name: "scan.mp4" }];
   const database = new DatabaseSync(databasePath);
   const videoDirectory = path.join(tempDir, "data", "scans", videoScanId, "videos");
-  const detailDirectory = path.join(tempDir, "data", "scans", videoScanId, "details");
   try {
     const insertScan = database.prepare(`
       INSERT INTO scans (id, status, image_count, images_json, videos_json, details_json, title, description, category, price, owner_user_id)
@@ -394,36 +364,13 @@ test("requires both route videos and 20 high-resolution detail frames for listin
       scanId: legacyScanId,
     });
     assert.equal(rejected.status, 409);
-    assert.match((await rejected.json()).error, /both capture routes/);
+    assert.match((await rejected.json()).error, /all required capture routes/);
 
-    insertScan.run(
-      incompleteScanId,
-      JSON.stringify(videos),
-      "[]",
-      "Missing details",
-      "",
-      "Other",
-      100,
-      seller.id,
-    );
-    const missingDetails = await requestListing({
-      title: "Missing details",
-      description: "",
-      category: "Other",
-      price: 100,
-      scanId: incompleteScanId,
-    });
-    assert.equal(missingDetails.status, 409);
-    assert.match((await missingDetails.json()).error, /at least 20 close-up frames/);
-
-    insertScan.run(videoScanId, JSON.stringify(videos), JSON.stringify(detailFrames), "Video scan", "", "Other", 100, seller.id);
+    insertScan.run(videoScanId, JSON.stringify(videos), "[]", "Video scan", "", "Other", 100, seller.id);
     await fs.promises.mkdir(videoDirectory, { recursive: true });
-    await fs.promises.mkdir(detailDirectory, { recursive: true });
-    await fs.promises.writeFile(path.join(videoDirectory, "route-a-part-1.mp4"), Buffer.from("test video"));
-    await fs.promises.writeFile(path.join(videoDirectory, "route-a-part-2.mp4"), Buffer.from("second route segment"));
-    await fs.promises.writeFile(path.join(videoDirectory, "route-b.mp4"), Buffer.from("test video"));
-    await fs.promises.writeFile(path.join(videoDirectory, "detail.mp4"), Buffer.from("test video"));
-    await fs.promises.writeFile(path.join(detailDirectory, detailFrames[0].name), Buffer.from("test detail image"));
+    await fs.promises.mkdir(path.join(tempDir, "data", "scans", videoScanId, "images"), { recursive: true });
+    await fs.promises.writeFile(path.join(videoDirectory, "scan.mp4"), Buffer.from("test original video"));
+    await fs.promises.writeFile(path.join(tempDir, "data", "scans", videoScanId, "model.ply"), Buffer.from("test reconstructed model"));
     const created = await requestListing({
       title: "Video scan",
       description: "",
@@ -436,23 +383,20 @@ test("requires both route videos and 20 high-resolution detail frames for listin
     const listings = await (await fetch(`${baseUrl}/api/listings`)).json();
     const { listing: createdListing } = await created.json();
     const listing = listings.listings.find((item) => item.id === createdListing.id);
-    assert.deepEqual(listing.scan.videos.map((video) => video.stage), stages);
-    assert.equal(listing.scan.details.length, 20);
-    const media = await fetch(`${baseUrl}/media/scans/${videoScanId}/videos/route-a`);
+    assert.deepEqual(listing.scan.videos, videos);
+    assert.equal(listing.scan.details.length, 0);
+    const model = await fetch(`${baseUrl}/media/scans/${videoScanId}/model.ply`);
+    assert.equal(model.status, 200);
+    assert.equal(await model.text(), "test reconstructed model");
+    const media = await fetch(`${baseUrl}/media/scans/${videoScanId}/videos/scan.mp4`);
     assert.equal(media.status, 200);
-    assert.equal(await media.text(), "test video");
-    const routeSegmentMedia = await fetch(`${baseUrl}/media/scans/${videoScanId}/videos/route-a-part-2.mp4`);
-    assert.equal(routeSegmentMedia.status, 200);
-    assert.equal(await routeSegmentMedia.text(), "second route segment");
-    const detailMedia = await fetch(`${baseUrl}/media/scans/${videoScanId}/details/${detailFrames[0].name}`);
-    assert.equal(detailMedia.status, 200);
-    assert.equal(await detailMedia.text(), "test detail image");
+    assert.equal(await media.text(), "test original video");
     assert.equal(listing.seller.username, seller.username);
   } finally {
-    database.prepare("DELETE FROM listings WHERE scan_id IN (?, ?, ?)").run(legacyScanId, incompleteScanId, videoScanId);
-    database.prepare("DELETE FROM scans WHERE id IN (?, ?, ?)").run(legacyScanId, incompleteScanId, videoScanId);
+    database.prepare("DELETE FROM listings WHERE scan_id IN (?, ?)").run(legacyScanId, videoScanId);
+    database.prepare("DELETE FROM scans WHERE id IN (?, ?)").run(legacyScanId, videoScanId);
     database.close();
-    await fs.promises.rm(path.dirname(videoDirectory), { recursive: true, force: true });
+    await fs.promises.rm(path.join(tempDir, "data", "scans", videoScanId), { recursive: true, force: true });
   }
 });
 

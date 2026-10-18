@@ -1,11 +1,9 @@
 # RealResale
 
-A secondhand marketplace MVP with an iPhone Safari capture experience. Sellers
-record two guided whole-item camera passes and one required 4K close-up pass.
-On-device product segmentation and orientation history guide capture; the
-server validates close-up resolution and sharpness, runs COLMAP on the whole-item
-passes, and stores close-up evidence images separately. Buyers can inspect
-listings and send private messages to sellers.
+A secondhand marketplace MVP with a single-video scan flow. Sellers record one
+video in the platform; the server selects sharp frames, reconstructs a 3D model
+with COLMAP on the GPU, and publishes both the model and original video with the
+listing. Buyers can inspect the model and video, then message sellers privately.
 
 ## Requirements
 
@@ -185,7 +183,7 @@ volume at `/workspace`. The server stores the database, uploaded videos, and
 reconstruction work there. Runpod supplies HTTPS at
 `https://<POD_ID>-3001.proxy.runpod.net`. Open the URL on an iPhone or other
 phone to use the web app; camera access is available in Safari/Chrome on that
-HTTPS origin, subject to the browser's orientation and torch support. The site
+HTTPS origin, subject to the browser's camera support. The site
 is public while the Pod runs. The MVP has local username/password accounts and
 private buyer-seller conversations, but no email verification, account
 recovery, moderation, or production-grade abuse protection; do not treat it as
@@ -226,63 +224,24 @@ the project does not create cloud resources or incur charges until those steps.
 
 ## Seller and buyer flow
 
-1. Enter the product name, price, category, and description before capture.
-   Changes can be saved while reconstruction runs.
-2. On a secure origin, the seller grants camera and device-orientation access,
-   then taps the product in the live preview. MediaPipe Interactive Segmenter
-   runs in the browser and provides product framing guidance. It starts loading
-   only after the seller taps the item; the UI reports model-download progress
-   and offers a retry if loading fails. The model is downloaded through the
-   platform server, then initialized separately so a stalled transfer is
-   reported instead of appearing to load indefinitely. The MagicTouch task
-   model is about 30.5 MB, in addition to the MediaPipe WASM runtime, so the
-   first download can take time on a mobile connection. This is Google's recommended
-   interactive segmentation model, designed for point-based item selection;
-   replacing it with a person-only model would not segment arbitrary products.
-   The WASM and model are downloaded from jsDelivr and Google Storage. Camera
-   frames themselves are not sent to those model hosts.
-3. The seller follows the on-screen aim point and turn direction through two
-   180-degree heading sectors, turning or lifting the item as needed. The
-   browser samples orientation, checks framing and brightness, and attempts to
-   enable the camera torch when the scene is dark. A browser does not show a
-   separate flashlight permission prompt: torch use is gated by camera access
-   and support in the camera track. The app blocks scanning if torch control is
-   unavailable. iPhone Safari camera access requires HTTPS and a certificate
-   the iPhone trusts. Browser support for orientation sensors and torch varies;
-   test on the target iPhone before relying on it.
-4. The browser previews frames and applies sharpness and near-duplicate
-   filtering. It requires at least 12 accepted frames from each guided pass
-   (24 total). The original two clips are uploaded to the PC-hosted server;
-   their combined size is limited to 512 MB. The server independently extracts
-   frames, verifies image dimensions, and runs additional registration checks.
-5. A required 20–30 second close-up video is captured at 4K source resolution.
-   The server independently extracts candidate images, requires at least 20
-   sharp frames whose longest dimension is at least 3840 pixels, and keeps those
-   images as full-resolution condition evidence. The app also requires the
-   selected product mask to fill 55–88% of the camera view before close-up
-   recording starts.
-6. COLMAP runs feature extraction and matching, camera alignment, dense stereo,
-   and point-cloud fusion using the two whole-item passes. Close-up frames are
-   deliberately kept out of that whole-item reconstruction: mixing macro
-   views into one model can destabilize camera registration. The RGB PLY is not
-   the detail evidence; buyers open the separate 4K images and original close-up
-   video to inspect surface condition.
-7. A seller cannot submit a listing unless the server marks reconstruction
-   `ready`, the required close-up video exists, and at least 20 high-resolution
-   frames pass the server's sharpness filter. Buyers can inspect the model,
-   source photos, close-up evidence, and all three original videos, then start
-   a private one-to-one conversation with the seller.
+1. Enter the product title, price, category, and description.
+2. Open the camera on a secure origin, record one video, and stop when ready.
+   Camera access requires HTTPS except on `localhost`. The camera recording is
+   capped at 120 seconds and 512 MB for server resource protection; there is no
+   minimum duration, route-coverage target, item-selection model, or required
+   close-up stage.
+3. Submit the video. The server samples frames across the clip, selects the
+   sharpest candidate in each time interval, and runs COLMAP reconstruction on
+   the GPU. The original video and selected full-resolution frames are retained.
+4. A listing can be published only after the platform finishes reconstruction
+   and marks the scan `ready`. The listing displays the reconstructed model and
+   the original video for buyers to inspect.
 
-The two heading sectors are a capture guide, not proof that every physical
-surface was actually shown. The browser cannot reliably verify that the phone
-orbited the product rather than rotating in place. The 4K close-up and its
-quality gates increase the chance that a roughly 0.5 mm flaw is represented in
-the submitted evidence, but do not detect flaws automatically or guarantee that
-any particular defect is visible. Focus, lens quality, lighting, distance,
-surface reflectivity, and occlusion all matter; test real items and compare
-against known defects before relying on this for resale decisions. Background
-segmentation currently guides live framing only; it is not applied to server
-reconstruction.
+Frame selection and successful 3D reconstruction depend on the video showing
+the item from sufficiently varied viewpoints with usable focus, lighting, and
+texture. The app does not guide or certify camera movement, and reconstruction
+does not guarantee that tiny scratches or other specific defects will be
+visible. Buyers can inspect the original video alongside the 3D model.
 
 Accounts use local usernames and scrypt-hashed passwords. Sessions use an
 HttpOnly cookie. Email verification and password recovery are not implemented.

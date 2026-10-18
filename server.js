@@ -40,7 +40,7 @@ const maxDetailVideoSeconds = 30;
 const supportedImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/avif"]);
 const idPattern = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
 const maxScanBytes = 512 * 1024 * 1024;
-const maxVideoSeconds = 45;
+const maxVideoSeconds = 120;
 const maxTotalVideoSeconds = 90;
 const maxVideoUploadFiles = 19;
 const scryptAsync = promisify(crypto.scrypt);
@@ -563,8 +563,87 @@ async function drainQueue() {
   }
 }
 
+async function extractSingleVideoFrames(scanId, directory, video) {
+  const videoDirectory = path.join(directory, "videos");
+  const candidateDirectory = path.join(directory, "frame-candidates");
+  const imagesDirectory = path.join(directory, "images");
+  await fs.mkdir(candidateDirectory, { recursive: true });
+  await fs.mkdir(imagesDirectory, { recursive: true });
+  await setProgress(scanId, "Selecting sharp, varied frames from the scan video", 3);
+
+  const sourcePath = path.join(videoDirectory, video.name);
+  const duration = await getVideoDuration(sourcePath);
+  if (!Number.isFinite(duration) || duration <= 0 || duration > maxVideoSeconds) {
+    throw new Error(`The scan video must be no longer than ${maxVideoSeconds} seconds.`);
+  }
+  const candidatesLimit = Math.min(160, Math.max(1, Math.ceil(duration * 2)));
+  await runFfmpeg(
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      sourcePath,
+      "-vf",
+      `fps=${Math.min(2, candidatesLimit / duration).toFixed(5)},scale=3840:3840:force_original_aspect_ratio=decrease`,
+      "-frames:v",
+      String(candidatesLimit),
+      "-q:v",
+      "2",
+      path.join(candidateDirectory, "%04d.jpg"),
+      "-y",
+    ],
+    "Sampling frames from the scan video",
+  );
+
+  const filenames = (await fs.readdir(candidateDirectory))
+    .filter((name) => /^\d{4}\.jpg$/.test(name))
+    .sort((left, right) => Number(path.parse(left).name) - Number(path.parse(right).name));
+  const targetCount = Math.min(maxImageCount, Math.max(1, Math.ceil(duration * 1.5)));
+  const bestByInterval = new Map();
+  for (const [index, filename] of filenames.entries()) {
+    const source = path.join(candidateDirectory, filename);
+    const metadata = await sharp(source).metadata();
+    if (!metadata.width || !metadata.height || Math.min(metadata.width, metadata.height) < 600) continue;
+    const { data, info } = await sharp(source)
+      .resize({ width: 640, height: 640, fit: "inside", withoutEnlargement: true })
+      .greyscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const sharpness = measureLaplacianVariance(data, info.width, info.height);
+    const bucket = Math.min(targetCount - 1, Math.floor((index / Math.max(1, filenames.length)) * targetCount));
+    const current = bestByInterval.get(bucket);
+    if (!current || sharpness > current.sharpness) {
+      bestByInterval.set(bucket, { filename, sharpness });
+    }
+  }
+
+  const selected = [...bestByInterval.values()]
+    .sort((left, right) => Number(path.parse(left.filename).name) - Number(path.parse(right.filename).name));
+  if (selected.length === 0) {
+    throw new Error("Could not extract readable frames from the scan video.");
+  }
+  const imageNames = [];
+  for (const [index, frame] of selected.entries()) {
+    const name = `${String(index + 1).padStart(3, "0")}.jpg`;
+    await fs.copyFile(path.join(candidateDirectory, frame.filename), path.join(imagesDirectory, name));
+    imageNames.push(name);
+  }
+  await fs.rm(candidateDirectory, { recursive: true, force: true });
+  db.prepare("UPDATE scans SET image_count = ?, images_json = ? WHERE id = ?").run(
+    imageNames.length,
+    JSON.stringify(imageNames),
+    scanId,
+  );
+  await setProgress(scanId, `Selected ${imageNames.length} frames from the scan video`, 20);
+}
+
 async function extractVideoFrames(scanId, directory, videos) {
   if (!ffmpegPath) throw new Error("Could not find the FFmpeg executable required to process videos.");
+  if (videos.length === 1 && videos[0].stage === "scan") {
+    await extractSingleVideoFrames(scanId, directory, videos[0]);
+    return;
+  }
   const videoDirectory = path.join(directory, "videos");
   const extractedDirectory = path.join(directory, "extracted");
   const imagesDirectory = path.join(directory, "images");
@@ -1034,12 +1113,10 @@ app.get("/api/health", (_req, res) => {
     queuedScans: jobQueue.length,
     minImages: minImageCount,
     maxImages: maxImageCount,
-    requiredCaptureSectors: videoSectors,
-    requiredCaptureStages: requiredVideoStages,
-    minDetailFrames,
-    minDetailResolution,
+    requiredCaptureSectors: [],
+    requiredCaptureStages: ["scan"],
     maxVideoSeconds,
-    maxTotalVideoSeconds: maxTotalVideoSeconds + maxDetailVideoSeconds,
+    maxTotalVideoSeconds: maxVideoSeconds,
   });
 });
 
@@ -1196,22 +1273,27 @@ app.post("/api/scans/videos", requireAuth, (req, res, next) => {
       const routeMatch = /^(route-a|route-b)(?:-part-([1-9]\d*))?$/.exec(basename);
       return {
         basename,
-        stage: routeMatch?.[1] || (basename === detailVideoStage ? detailVideoStage : null),
+        stage: basename === "scan"
+          ? "scan"
+          : routeMatch?.[1] || (basename === detailVideoStage ? detailVideoStage : null),
       };
     });
     const totalBytes = files.reduce((total, file) => total + file.size, 0);
     const parsedPrice = Number(price);
     const videoNames = videoDescriptors.map(({ basename }) => basename);
     const hasEachRoute = videoSectors.every((stage) => videoDescriptors.some((video) => video.stage === stage));
+    const isSingleScan = files.length === 1 && videoDescriptors[0]?.stage === "scan";
+    const isLegacyCapture = files.length >= requiredVideoStages.length &&
+      videoDescriptors.every((video) => video.stage !== "scan" && video.stage) &&
+      new Set(videoNames).size === files.length &&
+      hasEachRoute &&
+      videoDescriptors.filter((video) => video.stage === detailVideoStage).length === 1;
     if (
-      files.length < requiredVideoStages.length ||
-      videoDescriptors.some((video) => !video.stage) ||
-      new Set(videoNames).size !== files.length ||
-      !hasEachRoute ||
-      videoDescriptors.filter((video) => video.stage === detailVideoStage).length !== 1
+      (!isSingleScan && !isLegacyCapture) ||
+      new Set(videoNames).size !== files.length
     ) {
       await cleanupUploads(files);
-      res.status(400).json({ error: "Two route videos and one high-resolution close-up video are required." });
+      res.status(400).json({ error: "Upload one scan video to reconstruct the item." });
       return;
     }
     if (totalBytes > maxScanBytes) {
@@ -1366,21 +1448,25 @@ app.post("/api/listings", (req, res) => {
     res.status(403).json({ error: "You can publish only scans created by your account." });
     return;
   }
-  const uploadedStages = new Set(JSON.parse(scan.videos_json || "[]").map((video) => video.stage));
-  if (videoSectors.some((sector) => !uploadedStages.has(sector))) {
-    res.status(409).json({ error: "Only scans that include both capture routes can be published." });
-    return;
-  }
-  if (!uploadedStages.has(detailVideoStage)) {
-    res.status(409).json({ error: "Only scans with an original 4K close-up video can be published." });
-    return;
-  }
-  const details = JSON.parse(scan.details_json || "[]");
-  if (details.length < minDetailFrames) {
-    res.status(409).json({
-      error: `Only scans with at least ${minDetailFrames} close-up frames verified for 4K resolution and sharpness can be published.`,
-    });
-    return;
+  const videos = JSON.parse(scan.videos_json || "[]");
+  const isSingleVideoScan = videos.length === 1 && videos[0].stage === "scan";
+  if (!isSingleVideoScan) {
+    const uploadedStages = new Set(videos.map((video) => video.stage));
+    if (videoSectors.some((sector) => !uploadedStages.has(sector))) {
+      res.status(409).json({ error: "This scan does not include all required capture routes." });
+      return;
+    }
+    if (!uploadedStages.has(detailVideoStage)) {
+      res.status(409).json({ error: "This scan does not include its original close-up video." });
+      return;
+    }
+    const details = JSON.parse(scan.details_json || "[]");
+    if (details.length < minDetailFrames) {
+      res.status(409).json({
+        error: `This scan does not include ${minDetailFrames} verified close-up frames.`,
+      });
+      return;
+    }
   }
 
   const listingId = crypto.randomUUID();
