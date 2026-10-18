@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { createServer as createHttpsServer } from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -986,6 +988,31 @@ app.post("/api/auth/logout", (req, res) => {
   }
   clearSessionCookie(req, res);
   res.status(204).end();
+});
+
+app.get("/api/item-selection-model", async (_req, res, next) => {
+  try {
+    const modelResponse = await fetch(
+      "https://storage.googleapis.com/mediapipe-models/interactive_segmenter_v2/magic_touch/int8/latest/interactive_segmentation.task",
+      { signal: AbortSignal.timeout(120_000) },
+    );
+    if (!modelResponse.ok || !modelResponse.body) {
+      res.status(502).json({ error: `Could not retrieve the item selection model (HTTP ${modelResponse.status}).` });
+      return;
+    }
+    res.status(200);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    const contentLength = modelResponse.headers.get("content-length");
+    if (contentLength) res.setHeader("Content-Length", contentLength);
+    await pipeline(Readable.fromWeb(modelResponse.body), res);
+  } catch (error) {
+    if (res.headersSent) {
+      res.destroy(error);
+      return;
+    }
+    next(error);
+  }
 });
 
 app.get("/api/health", (_req, res) => {

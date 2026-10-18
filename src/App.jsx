@@ -291,11 +291,13 @@ function App() {
     segmenterInitializationStarted.current = false;
     worker.addEventListener("message", (event) => {
       if (event.data.type === "loading") {
-        setSegmenterLoadProgress(event.data.stage === "model" ? event.data.progress : null);
+        setSegmenterLoadProgress(event.data.stage === "download" ? event.data.progress : null);
         setSegmenterLoadError("");
         setCameraGuide(event.data.stage === "runtime"
           ? "Preparing the on-device vision runtime…"
-          : `Downloading the item selection model… ${event.data.progress}% of about 30 MB`);
+          : event.data.stage === "download"
+            ? `Downloading the item selection model… ${event.data.progress}% of about 30 MB`
+            : "Preparing the downloaded item selection model…");
       } else if (event.data.type === "ready") {
         setSegmenterReady(true);
         setSegmenterLoadProgress(100);

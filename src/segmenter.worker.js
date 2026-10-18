@@ -2,54 +2,71 @@ import { FilesetResolver, InteractiveSegmenter } from "@mediapipe/tasks-vision";
 import { measureForegroundMask, measureFrameBrightness } from "./scan-guidance.js";
 
 const wasmRoot = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.1/wasm";
-const modelAssetPath = "https://storage.googleapis.com/mediapipe-models/interactive_segmenter_v2/magic_touch/int8/latest/interactive_segmentation.task";
+const modelAssetPath = "/api/item-selection-model";
 const modelSizeBytes = 30_525_312;
+const maximumModelSizeBytes = 64 * 1024 * 1024;
 let segmenter;
 let inputCanvas;
+
+function readWithTimeout(reader, timeoutMs) {
+  let timeout;
+  return Promise.race([
+    reader.read(),
+    new Promise((_, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error("The item selection model download stopped responding. Check your connection and retry.")),
+        timeoutMs,
+      );
+    }),
+  ]).finally(() => clearTimeout(timeout));
+}
 
 self.addEventListener("message", async (event) => {
   const { type } = event.data;
   if (type === "initialize") {
+    let sourceReader;
     try {
       self.postMessage({ type: "loading", stage: "runtime", progress: 0 });
       const vision = await FilesetResolver.forVisionTasks(wasmRoot);
-      self.postMessage({ type: "loading", stage: "model", progress: 0 });
-      const response = await fetch(modelAssetPath);
+      self.postMessage({ type: "loading", stage: "download", progress: 0 });
+      const response = await fetch(modelAssetPath, { signal: AbortSignal.timeout(120_000) });
       if (!response.ok || !response.body) {
-        throw new Error(`The item selection model download failed (HTTP ${response.status}). Check your connection and try again.`);
+        throw new Error(`The item selection model download failed (HTTP ${response.status}). Try again.`);
       }
-      const sourceReader = response.body.getReader();
       const totalBytes = Number(response.headers.get("content-length")) || modelSizeBytes;
+      if (totalBytes > maximumModelSizeBytes) {
+        throw new Error("The item selection model response was unexpectedly large. Try again.");
+      }
+      sourceReader = response.body.getReader();
+      const modelBuffer = new Uint8Array(totalBytes);
       let receivedBytes = 0;
-      const modelStream = new ReadableStream({
-        async pull(controller) {
-          try {
-            const { done, value } = await sourceReader.read();
-            if (done) {
-              controller.close();
-              return;
-            }
-            receivedBytes += value.byteLength;
-            self.postMessage({
-              type: "loading",
-              stage: "model",
-              progress: Math.min(99, Math.round((receivedBytes / totalBytes) * 100)),
-            });
-            controller.enqueue(value);
-          } catch (error) {
-            controller.error(error);
-          }
-        },
-        cancel(reason) {
-          return sourceReader.cancel(reason);
-        },
-      });
+      while (true) {
+        const { done, value } = await readWithTimeout(sourceReader, 30_000);
+        if (done) break;
+        if (receivedBytes + value.byteLength > modelBuffer.byteLength) {
+          throw new Error("The item selection model download exceeded its expected size. Try again.");
+        }
+        modelBuffer.set(value, receivedBytes);
+        receivedBytes += value.byteLength;
+        self.postMessage({
+          type: "loading",
+          stage: "download",
+          progress: Math.min(99, Math.round((receivedBytes / totalBytes) * 100)),
+        });
+      }
+      if (receivedBytes !== totalBytes) {
+        throw new Error(`The item selection model download ended early (${receivedBytes} of ${totalBytes} bytes). Retry the download.`);
+      }
+      await sourceReader.cancel();
+      sourceReader = null;
+      self.postMessage({ type: "loading", stage: "initializing", progress: 100 });
       segmenter = await InteractiveSegmenter.createFromOptions(vision, {
-        baseOptions: { modelAssetBuffer: modelStream.getReader(), delegate: "CPU" },
+        baseOptions: { modelAssetBuffer: modelBuffer, delegate: "CPU" },
       });
       inputCanvas = new OffscreenCanvas(640, 640);
       self.postMessage({ type: "ready" });
     } catch (error) {
+      await sourceReader?.cancel(error).catch(() => {});
       self.postMessage({
         type: "error",
         message: error instanceof Error ? error.message : "Could not load the item selection model.",

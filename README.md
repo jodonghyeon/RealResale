@@ -232,9 +232,11 @@ the project does not create cloud resources or incur charges until those steps.
    then taps the product in the live preview. MediaPipe Interactive Segmenter
    runs in the browser and provides product framing guidance. It starts loading
    only after the seller taps the item; the UI reports model-download progress
-   and offers a retry if loading fails. The MagicTouch task model is about
-   30.5 MB, in addition to the MediaPipe WASM runtime, so the first download
-   can take time on a mobile connection. This is Google's recommended
+   and offers a retry if loading fails. The model is downloaded through the
+   platform server, then initialized separately so a stalled transfer is
+   reported instead of appearing to load indefinitely. The MagicTouch task
+   model is about 30.5 MB, in addition to the MediaPipe WASM runtime, so the
+   first download can take time on a mobile connection. This is Google's recommended
    interactive segmentation model, designed for point-based item selection;
    replacing it with a person-only model would not segment arbitrary products.
    The WASM and model are downloaded from jsDelivr and Google Storage. Camera
