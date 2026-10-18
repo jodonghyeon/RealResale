@@ -31,7 +31,7 @@ const maxScansInFlight = 1;
 const maxQueuedScans = 1;
 const minImageCount = 24;
 const minFramesPerSector = minImageCount / videoSectors.length;
-const maxImageCount = 120;
+const maxImageCount = 240;
 const minDetailFrames = 20;
 const maxDetailFrames = 40;
 const minDetailResolution = 3840;
@@ -587,16 +587,16 @@ async function extractSingleVideoFrames(scanId, directory, video) {
       "scale=960:960:force_original_aspect_ratio=decrease",
       "-q:v",
       "5",
-      path.join(candidateDirectory, "%04d.jpg"),
+      path.join(candidateDirectory, "%08d.jpg"),
       "-y",
     ],
     "Sampling frames from the scan video",
   );
 
   const filenames = (await fs.readdir(candidateDirectory))
-    .filter((name) => /^\d{4}\.jpg$/.test(name))
+    .filter((name) => /^\d{8}\.jpg$/.test(name))
     .sort((left, right) => Number(path.parse(left).name) - Number(path.parse(right).name));
-  const targetCount = Math.min(maxImageCount, Math.max(1, Math.ceil(duration * 2.5)));
+  const targetCount = Math.min(maxImageCount, Math.max(1, Math.ceil(duration * 4)));
   const bestByInterval = new Map();
   for (const [index, filename] of filenames.entries()) {
     const source = path.join(candidateDirectory, filename);
@@ -895,7 +895,15 @@ async function reconstructScan(scanId) {
   await runColmap(
     {
       ...base,
-      command: ["exhaustive_matcher", "--database_path", databasePath, "--FeatureMatching.use_gpu", "1"],
+      command: [
+        "sequential_matcher",
+        "--database_path",
+        databasePath,
+        "--SequentialMatching.overlap",
+        "20",
+        "--FeatureMatching.use_gpu",
+        "1",
+      ],
     },
     "Matching overlapping photos",
     45 * 60 * 1000,

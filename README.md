@@ -230,9 +230,10 @@ the project does not create cloud resources or incur charges until those steps.
    capped at 120 seconds and 512 MB for server resource protection; there is no
    minimum duration, route-coverage target, item-selection model, or required
    close-up stage.
-3. Submit the video. The server samples frames across the clip, selects the
-   sharpest candidate in each time interval, and runs COLMAP reconstruction on
-   the GPU. The original video and selected full-resolution frames are retained.
+3. Submit the video. The server examines every decoded frame, selects up to
+   240 sharp frames across the clip, and runs COLMAP's sequential video matcher
+   and reconstruction on the GPU. The original video and selected
+   full-resolution frames are retained.
 4. A listing can be published only after the platform finishes reconstruction
    and marks the scan `ready`. The listing displays the reconstructed model and
    the original video for buyers to inspect.
